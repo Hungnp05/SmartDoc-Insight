@@ -257,7 +257,7 @@ hr { border-color: var(--border) !important; }
 """, unsafe_allow_html=True)
 
 
-# ── Session State Init ────────────────────────────────────────────────────────
+# Session State Init
 
 def init_session():
     defaults = {
@@ -272,7 +272,7 @@ def init_session():
             st.session_state[k] = v
 
 
-# ── System Initialization ─────────────────────────────────────────────────────
+# System Initialization
 
 @st.cache_resource(show_spinner=False)
 def load_rag_system():
@@ -284,7 +284,7 @@ def load_rag_system():
     return ollama, vision, kb, rag
 
 
-# ── Sidebar ───────────────────────────────────────────────────────────────────
+# Sidebar
 
 def render_sidebar(ollama, kb, rag):
     with st.sidebar:
@@ -389,7 +389,7 @@ def render_sidebar(ollama, kb, rag):
         )
 
 
-# ── Document Processing ───────────────────────────────────────────────────────
+# Document Processing
 
 def process_document(uploaded_file, kb):
     """Handle document upload and processing pipeline."""
@@ -466,7 +466,7 @@ def process_document(uploaded_file, kb):
             st.session_state.processing = False
 
 
-# ── Chat Interface ────────────────────────────────────────────────────────────
+# Chat Interface
 
 def render_chat(rag):
     """Main chat area with message history and streaming responses."""
@@ -606,7 +606,7 @@ def render_sources(sources):
             st.markdown("---")
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# Main
 
 def main():
     init_session()
