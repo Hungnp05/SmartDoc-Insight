@@ -151,3 +151,307 @@ Every chunk stores:
 
 ## 🔒 Privacy
 All processing is **100% local**. No data leaves your machine. No API keys required.
+
+
+
+
+# SmartDoc-Insight
+
+Multi-Modal RAG for Complex Documents. Runs entirely local, no paid API required.
+
+---
+
+## System Requirements
+
+| Component | Minimum | Recommended |
+|-----------|---------|-------------|
+| OS | Windows 10/11, Ubuntu 20.04+ | Windows 11 / Ubuntu 22.04 |
+| Python | 3.10 | 3.11 |
+| RAM | 8GB | 16GB |
+| GPU VRAM | Not required | 6GB (RTX 4050+) |
+| Storage | 15GB (models + deps) | 20GB |
+
+---
+
+## Installation
+
+### Step 1: Install Ollama
+
+Download and install Ollama from https://ollama.ai
+
+After installation, Ollama runs in the background automatically. Verify it is running:
+
+```
+curl http://localhost:11434/api/tags
+```
+
+If it returns JSON, Ollama is running correctly. If you see `bind: Only one usage` when running `ollama serve`, Ollama is already running — ignore that error.
+
+### Step 2: Pull AI Models
+
+Open a terminal and run the following three commands. Each downloads several GB, so a stable internet connection is required:
+
+```
+ollama pull llama3:8b
+ollama pull llava:7b
+ollama pull nomic-embed-text
+```
+
+Verify all three models are available:
+
+```
+ollama list
+```
+
+All three models must appear in the list before proceeding.
+
+### Step 3: Clone or Extract the Project
+
+```
+cd E:\code
+tar -xzf smartdoc-insight.tar.gz
+cd RAG
+```
+
+Or if using git:
+
+```
+git clone <repo_url>
+cd smartdoc-insight
+```
+
+### Step 4: Create a Virtual Environment
+
+**Windows:**
+
+```
+python -m venv .venv
+.venv\Scripts\activate
+```
+
+**Linux / Mac:**
+
+```
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+After activation, the prompt will show `(.venv)` at the beginning of each line.
+
+### Step 5: Install Python Dependencies
+
+```
+pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+If you are on Windows and encounter errors with PaddleOCR:
+
+```
+pip install paddlepaddle
+pip install paddleocr
+```
+
+### Step 6: Configure Environment Variables
+
+```
+copy .env.example .env
+```
+
+Open the newly created `.env` file and verify the first line reads:
+
+```
+OLLAMA_BASE_URL=http://localhost:11434
+```
+
+Make sure it says `localhost` and not a different IP address. Leave all other lines at their default values.
+
+### Step 7: Enable dotenv Loading in Config
+
+Open `src/config.py` and add these two lines at the very top of the file, before `import os`:
+
+```python
+from dotenv import load_dotenv
+load_dotenv(override=True)
+```
+
+This ensures Python reads your `.env` file and overrides any cached environment values.
+
+---
+
+## Running the Application
+
+```
+streamlit run app/streamlit_app.py
+```
+
+The browser will open automatically at `http://localhost:8501`. If it does not open, navigate there manually.
+
+---
+
+## Usage
+
+### Uploading a Document
+
+1. Drag a PDF into the **Upload Document** area in the left sidebar, or click **Browse files**
+2. Click **Process Document**
+3. Wait for the progress bar to complete — the sidebar will show the number of chunks indexed
+
+The first run takes longer because the models need to initialize.
+
+### Asking Questions
+
+Once the sidebar shows `X chunks indexed`, type a question into the chat input at the bottom.
+
+Example questions:
+
+```
+What was the Q3 revenue?
+Which business segment had the highest growth?
+Summarize the main risks mentioned in the report.
+Compare performance between 2023 and 2024.
+```
+
+### Debug Tab
+
+Switch to the **Debug** tab to inspect the retrieval pipeline in detail: chunk scores before and after reranking.
+
+---
+
+## Creating a Sample PDF for Testing
+
+If you do not have a PDF ready, run the included script to generate a sample financial report:
+
+```
+pip install reportlab
+py scripts/create_sample_pdf.py
+```
+
+The file `sample_report.pdf` will be created in `data/uploads/`.
+
+---
+
+## Running Tests
+
+```
+pytest tests/ -v
+```
+
+Tests do not require Ollama to be running. The virtual environment must be active.
+
+---
+
+## Running with Docker
+
+Docker Desktop must be installed first.
+
+```
+docker-compose -f docker/docker-compose.yml up --build
+```
+
+Docker will pull the models automatically and start the application. Access it at `http://localhost:8501`.
+
+---
+
+## Project Structure
+
+```
+RAG/
+├── app/
+│   └── streamlit_app.py          Streamlit UI
+├── src/
+│   ├── config.py                 Central configuration
+│   ├── pipeline.py               Top-level orchestrator
+│   ├── layers/
+│   │   ├── vision_processing.py  PDF reading and text extraction
+│   │   ├── knowledge_base.py     ChromaDB, embeddings, chunking
+│   │   └── retrieval_reasoning.py  Retrieval, reranking, answer generation
+│   ├── models/
+│   │   ├── ollama_client.py      Ollama API wrapper
+│   │   └── embeddings.py         Embedding utilities
+│   └── utils/
+│       ├── table_extractor.py    HTML table to Markdown converter
+│       ├── chunker.py            Text chunking utilities
+│       └── pdf_parser.py         PDF to image conversion
+├── scripts/
+│   ├── create_sample_pdf.py      Generate a sample PDF for testing
+│   └── benchmark.py              Measure retrieval accuracy
+├── tests/                        Unit tests
+├── data/
+│   ├── uploads/                  Uploaded PDF files
+│   └── chroma_db/                Vector database (auto-created)
+├── docker/
+│   ├── Dockerfile
+│   └── docker-compose.yml
+├── .env                          Your configuration (created from .env.example)
+├── .env.example                  Configuration template
+└── requirements.txt              Python dependencies
+```
+
+---
+
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server address |
+| `LLM_MODEL` | `llama3:8b` | Model used to generate answers |
+| `VISION_MODEL` | `llava:7b` | Model used to describe charts and figures |
+| `EMBED_MODEL` | `nomic-embed-text` | Model used to generate embeddings |
+| `PDF_DPI` | `200` | Resolution for rendering PDF pages |
+| `RETRIEVAL_TOP_K` | `10` | Number of candidate chunks retrieved initially |
+| `RERANK_TOP_K` | `4` | Number of chunks kept after reranking |
+| `CHUNK_SIZE` | `512` | Maximum characters per chunk |
+
+---
+
+## Troubleshooting
+
+**Problem: `0 chunks indexed` after uploading a document**
+
+Check that `src/config.py` has `load_dotenv(override=True)` at the top. Verify that `OLLAMA_BASE_URL` in `.env` is set to `localhost`.
+
+**Problem: `ollama serve` reports `bind: Only one usage`**
+
+Ollama is already running. No action needed — use it as is.
+
+**Problem: `Cannot import PPStructure from paddleocr`**
+
+This is a breaking API change in newer versions of PaddleOCR. The system automatically falls back to PyMuPDF for text extraction, which works correctly. Core functionality is not affected.
+
+**Problem: Model not found when querying**
+
+Re-pull the required models:
+
+```
+ollama pull llama3:8b
+ollama pull nomic-embed-text
+```
+
+**Problem: Port 8501 is already in use**
+
+```
+streamlit run app/streamlit_app.py --server.port 8502
+```
+
+**Problem: Want to clear all indexed data**
+
+Delete the `data/chroma_db/` directory, or use the **Clear Knowledge Base** button in the sidebar.
+
+---
+
+## Benchmarking
+
+```
+py scripts/benchmark.py --doc data/uploads/sample_report.pdf --output results.json
+```
+
+---
+
+## Diagnostics
+
+If you encounter an error that cannot be resolved, run the diagnostic script and share the output:
+
+```
+py debug.py
+```
