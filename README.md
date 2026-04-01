@@ -138,14 +138,65 @@ Every chunk stores:
 
 ---
 
-## Performance
+## Performance Benchmark
 
-| Metric | Standard RAG | SmartDoc-Insight |
-|--------|-------------|-----------------|
-| Table QA Accuracy | 52% | **91%** |
-| Chart Understanding | 0% | **78%** |
-| Mixed-Content Docs | 61% | **89%** |
-| Processing Speed | - | ~45s/page |
+**SmartDoc-Insight** is designed to handle complex PDF documents containing **tables**, **charts**, and **text** more effectively than standard RAG systems.
+
+Below are the benchmark results on the sample document `sample_report.pdf` (8 regions) using 3 representative questions across different content types.
+
+### Benchmark Results (Current Version)
+
+| Question Type     | Question Sample                                              | Accuracy | Latency   | Evaluation     |
+|-------------------|--------------------------------------------------------------|----------|-----------|----------------|
+| **Table QA**      | What is the total revenue in Q3?                            | **50%**  | 31.2s     | Average        |
+| **Chart QA**      | What trend does the growth chart show?                      | **75%**  | 29.0s     | Good           |
+| **Text QA**       | What are the main risks mentioned in the report?            | **33%**  | 27.7s     | Needs Improvement |
+| **Overall**       | -                                                            | **53%**  | -         | Average        |
+
+**Document Processing Time**: 71.9 seconds (8 regions)
+
+### Performance Analysis
+
+**Strengths:**
+- Best performance on **Chart QA (75%)** — The Vision Processing Layer effectively extracts and interprets chart trends.
+
+**Weaknesses:**
+- **Text QA** shows the lowest score (33%) — Retrieval and reasoning for pure text content need improvement.
+- **Table QA** is moderate (50%) — Current keyword-based evaluation may underestimate actual semantic accuracy.
+
+**Notes:**
+- Evaluation is currently based on simple **keyword matching**, which can be strict and may not fully reflect real answer quality.
+- The warning `bert.embeddings.position_ids | UNEXPECTED` is normal when loading the cross-encoder from a different task and can be safely ignored.
+- Latency is relatively high due to local execution with Ollama and heavy vision processing. Optimization is planned.
+
+### Comparison with Baseline (Planned)
+
+| Metric                  | SmartDoc-Insight | Standard RAG (Baseline) | Improvement |
+|-------------------------|------------------|--------------------------|-------------|
+| Overall Accuracy        | 53%              | -                        | -           |
+| Table QA                | 50%              | -                        | -           |
+| Chart QA                | 75%              | -                        | -           |
+| Text QA                 | 33%              | -                        | -           |
+| Avg Latency per Query   | ~29s             | -                        | -           |
+
+> **Note**: The baseline comparison will be updated once standard RAG results (without Vision Layer) are available.
+
+### Improvement Roadmap
+
+- Replace keyword-based evaluation with **LLM-as-Judge** for more accurate semantic scoring.
+- Enhance retrieval with hybrid search + reranker for Text and Table QA.
+- Improve table extraction in Vision Layer (explore Donut, Nougat, or specialized table parsers).
+- Reduce latency through model quantization, caching, and batch processing.
+- Expand benchmark with larger datasets and more diverse questions.
+
+---
+
+Full benchmark results are saved to `results.json` after each run.
+
+### How to Run the Benchmark
+
+```bash
+python scripts/benchmark.py --doc data/uploads/sample_report.pdf --output results.json
 
 ---
 
