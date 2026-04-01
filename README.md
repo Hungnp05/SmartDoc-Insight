@@ -1,4 +1,4 @@
-# 🧠 SmartDoc-Insight
+# SmartDoc-Insight
 ### Multi-Modal RAG for Complex Documents
 
 > **Local-First** · **Table-Aware** · **Vision-Enhanced** · **Privacy-Preserving**
@@ -7,7 +7,7 @@ A production-grade Retrieval-Augmented Generation system that understands PDFs c
 
 ---
 
-## 🏗️ Architecture Overview
+## Architecture Overview
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -24,7 +24,7 @@ A production-grade Retrieval-Augmented Generation system that understands PDFs c
 └──────────────┴──────────────┴──────────────┴───────────────┘
 ```
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
 - Docker & Docker Compose
@@ -54,7 +54,7 @@ Open [http://localhost:8501](http://localhost:8501)
 
 ---
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 smartdoc-insight/
@@ -97,7 +97,7 @@ smartdoc-insight/
 
 ---
 
-## ⚙️ Tech Stack
+## Tech Stack
 
 | Component | Technology | Purpose |
 |-----------|-----------|---------|
@@ -112,7 +112,7 @@ smartdoc-insight/
 
 ---
 
-## 🎯 Key Technical Innovations
+## Key Technical Innovations
 
 ### 1. Table-Aware RAG (+40% accuracy)
 Instead of naively chunking PDFs, we:
@@ -138,7 +138,7 @@ Every chunk stores:
 
 ---
 
-## 📊 Performance
+## Performance
 
 | Metric | Standard RAG | SmartDoc-Insight |
 |--------|-------------|-----------------|
@@ -149,7 +149,7 @@ Every chunk stores:
 
 ---
 
-## 🔒 Privacy
+## Privacy
 All processing is **100% local**. No data leaves your machine. No API keys required.
 
 
