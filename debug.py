@@ -1,5 +1,6 @@
 import sys
 import os
+from src.layers.knowledge_base import KnowledgeBaseLayer
 
 sys.path.insert(0, '.')
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
@@ -168,3 +169,11 @@ except Exception as e:
 print("\n=== XONG ===")
 print("Neu tat ca Step deu OK, chay lai: streamlit run app/streamlit_app.py")
 print("Neu co Step FAIL, paste ket qua nay de duoc ho tro.")
+
+
+kb = KnowledgeBaseLayer(config, ollama)
+results = kb.retrieve("doanh thu 2024", top_k=5)
+for r in results:
+    print(f"\n[score={r.score:.3f}] page={r.chunk.metadata.get('page')} type={r.chunk.metadata.get('content_type')}")
+    print(r.chunk.text[:400])
+    print("---")
