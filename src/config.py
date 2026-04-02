@@ -106,8 +106,11 @@ Nguyên tắc:
 1. Chỉ sử dụng thông tin từ context được cung cấp. Không bịa đặt.
 2. Nếu thông tin không đủ, hãy nói rõ "Tài liệu không chứa đủ thông tin để trả lời câu hỏi này."
 3. Khi trích dẫn bảng biểu, hãy giải thích rõ ràng các con số.
-4. Khi trích dẫn biểu đồ, hãy nêu xu hướng và các điểm dữ liệu quan trọng.
-5. Trả lời bằng ngôn ngữ của câu hỏi (Tiếng Việt hoặc Tiếng Anh).
+4. Khi trích dẫn bảng biểu, hãy đọc theo HÀNG - mỗi hàng là một bản ghi riêng biệt.
+5. Khi trích dẫn biểu đồ, hãy nêu xu hướng và các điểm dữ liệu quan trọng.
+6. Không nhầm lẫn số liệu giữa các cột khác nhau trong cùng một bảng.
+7. Khi không chắc chắn về một con số, hãy nói rõ nguồn: 'Theo bảng X, trang Y...'
+8. Trả lời bằng ngôn ngữ của câu hỏi (Tiếng Việt hoặc Tiếng Anh).
 """
 
 RAG_PROMPT_TEMPLATE = """<context>
