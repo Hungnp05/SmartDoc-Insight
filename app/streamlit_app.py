@@ -288,11 +288,11 @@ def load_rag_system():
 
 def render_sidebar(ollama, kb, rag):
     with st.sidebar:
-        st.markdown("### 🧠 SmartDoc-Insight")
+        st.markdown("### SmartDoc-Insight")
         st.markdown("---")
 
         # System Status
-        st.markdown("#### 📡 System Status")
+        st.markdown("#### System Status")
         models = ollama.list_models()
 
         llm_ok = ollama.is_model_available(config.ollama.llm_model)
@@ -317,7 +317,7 @@ def render_sidebar(ollama, kb, rag):
         st.markdown("---")
 
         # Upload
-        st.markdown("#### 📤 Upload Document")
+        st.markdown("#### Upload Document")
         uploaded_file = st.file_uploader(
             "PDF or Image",
             type=["pdf", "png", "jpg", "jpeg"],
@@ -325,13 +325,13 @@ def render_sidebar(ollama, kb, rag):
         )
 
         if uploaded_file and not st.session_state.processing:
-            if st.button("🚀 Process Document", use_container_width=True):
+            if st.button("Process Document", use_container_width=True):
                 process_document(uploaded_file, kb)
 
         st.markdown("---")
 
         # Knowledge Base Stats
-        st.markdown("#### 📚 Knowledge Base")
+        st.markdown("#### Knowledge Base")
         stats = kb.get_stats()
 
         col1, col2 = st.columns(2)
@@ -361,7 +361,7 @@ def render_sidebar(ollama, kb, rag):
                         st.rerun()
 
         if st.session_state.active_doc:
-            st.info(f"🎯 Filtering: `{st.session_state.active_doc}`")
+            st.info(f"Filtering: `{st.session_state.active_doc}`")
             if st.button("❌ Clear Filter"):
                 st.session_state.active_doc = None
                 st.rerun()
@@ -438,11 +438,11 @@ def process_document(uploaded_file, kb):
                 progress_callback=update_progress,
             )
 
-            status_text.markdown("🔢 Generating embeddings...")
+            status_text.markdown("Generating embeddings...")
             progress_bar.progress(0.8)
 
             def kb_progress(msg):
-                status_text.markdown(f"💾 {msg}")
+                status_text.markdown(f"{msg}")
 
             chunk_count = kb.ingest_document(processed_doc, progress_callback=kb_progress)
 
@@ -485,7 +485,7 @@ def render_chat(rag):
     if not st.session_state.messages:
         st.markdown("""
         <div style="text-align:center; padding: 1rem 1rem; color: #4a4d66;">
-            <div style="font-size: 3rem; margin-bottom: 1rem;">🧠</div>
+            <div style="font-size: 3rem; margin-bottom: 1rem;"></div>
             <div style="font-family: Space Mono; font-size: 0.9rem; color: #6b6f88; margin-bottom: 2rem;">
                 Upload a PDF to begin. I can analyze text, tables, and charts.
             </div>
@@ -505,10 +505,10 @@ def render_chat(rag):
                     render_sources(msg["sources"])
 
     # Chat Input
-    if prompt := st.chat_input("Đặt câu hỏi về tài liệu..."):
+    if prompt := st.chat_input("Ask questions about the document...."):
         # Add user message
         st.session_state.messages.append({"role": "user", "content": prompt})
-        st.markdown(f'<div class="chat-message-user">💬 {prompt}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="chat-message-user"> {prompt}</div>', unsafe_allow_html=True)
 
         # Check KB has content
         stats = rag.kb.get_stats()
@@ -516,7 +516,7 @@ def render_chat(rag):
             st.warning("⚠️ Knowledge base is empty. Please upload a document first.")
             st.session_state.messages.append({
                 "role": "assistant",
-                "content": "Vui lòng upload tài liệu trước khi đặt câu hỏi.",
+                "content": "Please upload the document before asking a question.",
                 "sources": []
             })
             return
@@ -537,7 +537,7 @@ def render_chat(rag):
 
                     # Show metadata
                     st.caption(
-                        f"🔍 Retrieved: {response.retrieved_count} → "
+                        f"Retrieved: {response.retrieved_count} → "
                         f"Re-ranked: {response.reranked_count} chunks"
                     )
 
@@ -580,7 +580,7 @@ def render_sources(sources):
         )
 
     # Expandable source details
-    with st.expander("📖 Xem nội dung nguồn chi tiết", expanded=False):
+    with st.expander("Xem nội dung nguồn chi tiết", expanded=False):
         for i, source in enumerate(sources, 1):
             st.markdown(f"**{i}. {source.display_label}** — `{source.source_file}` (Score: {source.score:.4f})")
             st.markdown(f"> {source.content}")
@@ -616,11 +616,11 @@ def main():
 
 def render_debug(rag):
     """Debug view: show retrieval pipeline internals."""
-    st.markdown("### 🔬 Retrieval Debug")
+    st.markdown("### Retrieval Debug")
     st.markdown("Test the retrieval pipeline and see re-ranking in action.")
 
     debug_query = st.text_input("Test Query:", placeholder="Enter a test question...")
-    if st.button("🔍 Run Debug Retrieval") and debug_query:
+    if st.button("Run Debug Retrieval") and debug_query:
         with st.spinner("Running retrieval..."):
             try:
                 debug_info = rag.get_retrieval_debug(debug_query)
@@ -660,7 +660,7 @@ def render_debug(rag):
 def render_about():
     """About page with architecture overview."""
     st.markdown("""
-    ### 🧠 SmartDoc-Insight
+    ### SmartDoc-Insight
 
     **Multi-Modal RAG for Complex Documents** — Local-First, Privacy-Preserving.
 
