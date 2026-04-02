@@ -138,19 +138,19 @@ Every chunk stores:
 
 ---
 
-## 📊 Performance Benchmark
+## Performance Benchmark
 
-**SmartDoc-Insight** is designed to handle complex PDF documents containing **tables**, **charts**, and **text** more effectively than standard RAG systems.
+**SmartDoc-Insight** is designed to effectively handle complex PDF documents containing **tables**, **charts**, and **text** — areas where traditional RAG systems often struggle.
 
-Below are the latest benchmark results on the sample document `sample_report.pdf` (8 regions) using 3 representative questions across different content types.
+The following results are from the latest benchmark run on the sample document `sample_report.pdf` (8 regions) using 3 representative questions.
 
-### Benchmark Results (Latest Run)
+### Benchmark Results (Latest)
 
 | Question Type     | Question Sample                                              | Accuracy | Latency   | Evaluation          |
 |-------------------|--------------------------------------------------------------|----------|-----------|---------------------|
 | **Table QA**      | What is the total revenue in Q3?                            | **50%**  | 27.8s     | Average             |
 | **Chart QA**      | What trend does the growth chart show?                      | **75%**  | 26.4s     | Good                |
-| **Text QA**       | What are the main risks mentioned in the report?            | **67%**  | 22.3s     | Improved            |
+| **Text QA**       | What are the main risks mentioned in the report?            | **67%**  | 22.3s     | Good                |
 | **Overall**       | -                                                            | **64%**  | -         | Moderate            |
 
 **Document Processing Time**: 50.4 seconds (8 regions)
@@ -158,43 +158,42 @@ Below are the latest benchmark results on the sample document `sample_report.pdf
 ### Performance Analysis
 
 **Strengths:**
-- Excellent performance on **Chart QA (75%)** — The Vision Processing Layer successfully extracts and interprets chart trends.
-- Significant improvement in **Text QA**, increasing from 33% to **67%**.
-- Faster document processing time compared to previous runs (reduced from 71.9s to 50.4s).
+- Strong performance on **Chart QA (75%)** — The Vision Processing Layer demonstrates good capability in understanding and describing chart trends.
+- Notable improvement in **Text QA**, achieving **67%** accuracy.
+- Reduced document processing time (from previous ~72s down to **50.4s**).
 
-**Weaknesses:**
-- **Table QA** remains at 50% — Still the weakest area, likely due to challenges in extracting and reasoning over structured tabular data.
-- Overall accuracy at 64% indicates room for further improvement in retrieval quality and reasoning capabilities.
+**Areas for Improvement:**
+- **Table QA** remains the weakest point at 50%. The system can identify the table but still struggles with precise numerical extraction and reasoning.
+- Overall accuracy of 64% shows that while progress has been made, there is still significant room for enhancement in retrieval quality and answer precision.
 
 **Notes:**
-- The current evaluation still uses **keyword-based scoring**. We are transitioning to a more robust **LLM-as-Judge** system for semantic accuracy.
-- The warning `bert.embeddings.position_ids | UNEXPECTED` is harmless and can be safely ignored when loading the cross-encoder model.
-- Latency has improved but remains relatively high due to local execution with Ollama and vision processing layers.
+- The current benchmark uses **keyword-based evaluation**, which is simple but can be strict and may underestimate true semantic performance.
+- The `bert.embeddings.position_ids | UNEXPECTED` warning is normal when loading the cross-encoder model and can be safely ignored.
+- Latency per query averages around 25.5 seconds, which is acceptable for a fully local setup but will be further optimized.
 
-### Comparison with Previous Version
+### Comparison with Previous Benchmark
 
-| Metric             | Previous Run | Latest Run | Improvement |
-|--------------------|--------------|------------|-------------|
-| Overall Accuracy   | 53%          | **64%**    | **+11%**    |
-| Table QA           | 50%          | 50%        | -           |
-| Chart QA           | 75%          | 75%        | -           |
-| Text QA            | 33%          | **67%**    | **+34%**    |
-| Avg Latency/Query  | ~29s         | ~25.5s     | Improved    |
-| Processing Time    | 71.9s        | **50.4s**  | **-21.5s**  |
+| Metric                  | Previous Run | Latest Run   | Change      |
+|-------------------------|--------------|--------------|-------------|
+| Overall Accuracy        | 53%          | **64%**      | **+11%**    |
+| Table QA                | 50%          | 50%          | -           |
+| Chart QA                | 75%          | 75%          | -           |
+| Text QA                 | 33%          | **67%**      | **+34%**    |
+| Document Processing Time| 71.9s        | **50.4s**    | **-30%**    |
 
 ### Improvement Roadmap
 
-- Fully replace keyword-based evaluation with **LLM-as-Judge** (Correctness + Faithfulness) for more reliable scoring.
-- Enhance table understanding by improving the Vision Layer and SmartChunker.
-- Implement hybrid retrieval (vector + keyword + metadata filtering).
-- Optimize latency through model quantization, embedding caching, and parallel processing.
-- Expand the benchmark with a larger and more diverse set of questions (target: 20+ questions).
+- Transition from keyword-based scoring to **LLM-as-Judge** (Correctness + Faithfulness) for more reliable and semantic evaluation.
+- Strengthen table extraction and reasoning capabilities in the Vision and Knowledge Base layers.
+- Implement hybrid retrieval and advanced reranking techniques.
+- Optimize latency through caching, quantization, and parallel processing.
+- Expand the benchmark dataset with more diverse and challenging questions.
 
 ---
 
-Full detailed benchmark results (including per-question explanations) are saved to `benchmark_results.json` after each run.
+Full benchmark details are automatically saved to `benchmark_results.json` after each run.
 
-**How to reproduce the benchmark:**
+**To reproduce this benchmark:**
 ```bash
 python scripts/benchmark.py --doc data/uploads/sample_report.pdf
 
