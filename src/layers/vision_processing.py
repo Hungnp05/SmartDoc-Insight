@@ -124,6 +124,7 @@ class VisionProcessingLayer:
         if not blocks:
             return self._split_text_into_regions(page_text, page_img, page_num)
 
+        text_chunks = []
         current_chunk = []
         current_len = 0
 
@@ -137,14 +138,36 @@ class VisionProcessingLayer:
             if not block_text:
                 continue
 
+            is_table_block = self._looks_like_table(block_text)
+
+            if is_table_block:
+                if current_chunk:
+                    regions.append(DocumentRegion(
+                        region_type="text",
+                        bbox=BoundingBox(0, 0, w, h),
+                        confidence=1.0,
+                        page_num=page_num,
+                        content="\n".join(current_chunk),
+                    ))
+                    current_chunk = []
+                    current_len = 0
+
+                regions.append(DocumentRegion(
+                    region_type="table",
+                    bbox=BoundingBox(0, 0, w, h),
+                    confidence=0.85,
+                    page_num=page_num,
+                    content=block_text,
+                ))
+                continue
+
             if current_len + len(block_text) > 600 and current_chunk:
-                combined = "\n".join(current_chunk)
                 regions.append(DocumentRegion(
                     region_type="text",
                     bbox=BoundingBox(0, 0, w, h),
                     confidence=1.0,
                     page_num=page_num,
-                    content=combined,
+                    content="\n".join(current_chunk),
                 ))
                 current_chunk = []
                 current_len = 0
@@ -161,8 +184,55 @@ class VisionProcessingLayer:
                 content="\n".join(current_chunk),
             ))
 
-        return regions
+        return self._merge_adjacent_table_blocks(regions)
 
+    def _looks_like_table(self, text: str) -> bool:
+        lines = [l.strip() for l in text.split("\n") if l.strip()]
+        if len(lines) < 2:
+            return False
+        pipe_lines = sum(1 for l in lines if l.count("|") >= 2)
+        if pipe_lines >= 2:
+            return True
+        tab_lines = sum(1 for l in lines if l.count("\t") >= 2)
+        if tab_lines >= len(lines) * 0.6:
+            return True
+        if len(lines) >= 3:
+            num_pattern = 0
+            for line in lines:
+                parts = line.split()
+                nums = sum(1 for p in parts if any(c.isdigit() for c in p))
+                if nums >= 3:
+                    num_pattern += 1
+            if num_pattern >= len(lines) * 0.5:
+                return True
+        return False
+
+    def _merge_adjacent_table_blocks(self, regions: list) -> list:
+        if not regions:
+            return regions
+        merged = []
+        i = 0
+        while i < len(regions):
+            if regions[i].region_type != "table":
+                merged.append(regions[i])
+                i += 1
+                continue
+            combined = regions[i].content
+            j = i + 1
+            while j < len(regions) and regions[j].region_type == "table":
+                combined += "\n" + regions[j].content
+                j += 1
+            merged.append(DocumentRegion(
+                region_type="table",
+                bbox=regions[i].bbox,
+                confidence=regions[i].confidence,
+                page_num=regions[i].page_num,
+                content=combined,
+            ))
+            i = j
+        return merged
+    
+    
     def _split_text_into_regions(self, page_text, page_img, page_num):
         h, w = page_img.shape[:2]
         regions = []
