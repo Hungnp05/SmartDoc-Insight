@@ -198,7 +198,7 @@ Full benchmark details are automatically saved to `benchmark_results.json` after
 **To reproduce this benchmark:**
 ```bash
 python scripts/benchmark.py --doc data/uploads/sample_report.pdf
-
+```
 
 
 ## System Requirements
