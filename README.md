@@ -69,42 +69,47 @@ Open [http://localhost:8501](http://localhost:8501)
 ## Project Structure
 
 ```
-smartdoc-insight/
-├── src/
-│   ├── layers/
-│   │   ├── vision_processing.py     # Layer A: OCR, Layout, Table, Chart
-│   │   ├── knowledge_base.py        # Layer B: ChromaDB, Embeddings
-│   │   ├── retrieval_reasoning.py   # Layer C: Search, Re-rank, LLM
-│   │   └── __init__.py
-│   ├── models/
-│   │   ├── ollama_client.py         # Ollama API wrapper
-│   │   └── embeddings.py            # Embedding model handler
-│   ├── utils/
-│   │   ├── pdf_parser.py            # PDF → page images
-│   │   ├── table_extractor.py       # Table → Markdown converter
-│   │   └── chunker.py               # Smart chunking logic
-│   └── config.py                    # Central configuration
-├── app/
-│   ├── streamlit_app.py             # Main Streamlit app
-│   ├── components/
-│   │   ├── sidebar.py               # Upload & settings panel
-│   │   ├── chat.py                  # Chat interface
-│   │   └── source_viewer.py         # Retrieved sources display
-│   └── styles/
-│       └── main.css                 # Custom styling
-├── docker/
-│   ├── Dockerfile
-│   └── docker-compose.yml
-├── tests/
-│   ├── test_vision.py
-│   ├── test_retrieval.py
-│   └── sample_docs/
-├── scripts/
-│   ├── setup.sh                     # One-click setup
-│   └── benchmark.py                 # Accuracy benchmarking
-├── .env.example
-├── requirements.txt
-└── README.md
+SmartDoc-Insight/
+├── .env.example                    # Environment configuration template
+├── .gitignore                      # Git ignore rules
+├── README.md                       # Project documentation
+├── Makefile                        # Build automation (3.8%)
+├── requirements.txt                # Python dependencies
+├── debug.py                        # Debug script
+│
+├── app/                            # Application layer
+│   ├── __init__.py
+│   └── streamlit_app.py           # Main Streamlit web application
+│
+├── src/                            # Core source code (92.8% Python)
+│   ├── __init__.py
+│   ├── config.py                  # Configuration management
+│   ├── pipeline.py                # Main processing pipeline
+│   │
+│   ├── layers/                    # Processing layers
+│   │   ├── __init__.py
+│   │   ├── vision_processing.py   # Vision/image processing layer
+│   │   ├── knowledge_base.py      # Knowledge base layer
+│   │   └── retrieval_reasoning.py # Retrieval and reasoning layer
+│   │
+│   ├── models/                    # Model clients
+│   │   ├── __init__.py
+│   │   └── ollama_client.py       # Ollama LLM client
+│   │
+│   └── utils/                     # Utility functions
+│       ├── __init__.py
+│       └── table_extractor.py     # Table extraction utility
+│
+├── docker/                         # Docker configuration (1.2%)
+│   ├── Dockerfile                 # Container image definition
+│   └── docker-compose.yml         # Multi-container orchestration
+│
+├── scripts/                        # Utility scripts (2.2% Shell)
+│   ├── setup.sh                   # Setup script
+│   └── benchmark.py               # Performance benchmarking
+│
+└── tests/                          # Test suite
+    └── test_pipeline.py           # Pipeline tests
 ```
 
 ---
