@@ -5,6 +5,8 @@
 
 A production-grade Retrieval-Augmented Generation system that understands PDFs containing mixed content: raw text, financial tables, and growth charts — all running entirely on local hardware (RTX 4050 6GB VRAM).
 
+Video Demo: https://www.youtube.com/watch?v=JRN3Oe5GRZA&t=157s
+
 ---
 
 ## Key Features & Achievements
