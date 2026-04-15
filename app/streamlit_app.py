@@ -560,22 +560,22 @@ def render_sources(sources):
     if not sources:
         return
 
-    st.markdown("**📎 Nguồn tham khảo:**")
+    st.markdown("**📎 References:**")
 
     for source in sources:
         type_class = source.content_type if source.content_type in ("table", "figure") else "text"
         st.markdown(
             f'<span class="source-chip {type_class}">'
-            f'{source.type_emoji} Trang {source.page} · {source.content_type.upper()} '
+            f'Trang {source.page} · {source.content_type.upper()} '
             f'· {source.score:.0%}'
             f'</span>',
             unsafe_allow_html=True,
         )
 
     # Expandable source details
-    with st.expander("Xem nội dung nguồn chi tiết", expanded=False):
+    with st.expander("See the detailed source content", expanded=False):
         for i, source in enumerate(sources, 1):
-            st.markdown(f"**{i}. {source.display_label}** — `{source.source_file}` (Score: {source.score:.4f})")
+            st.markdown(f"**{i}. {getattr(source, 'display_label', 'Source')}** — `{source.source_file}` (Score: {source.score:.4f})")
             st.markdown(f"> {source.content}")
             st.markdown("---")
 
