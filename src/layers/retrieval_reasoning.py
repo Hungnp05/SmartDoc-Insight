@@ -1,9 +1,31 @@
+import math
 import re
 import logging
-from dataclasses import dataclass
-from typing import Optional, Generator
+from dataclasses import dataclass, field
+from typing import Optional, Iterator
 
 logger = logging.getLogger(__name__)
+
+# Rough characters-per-token for budgeting the prompt (Vietnamese/English mix, Llama 3 tokenizer).
+CHARS_PER_TOKEN = 2.5
+# Tokens reserved for the system prompt, template and question.
+PROMPT_OVERHEAD_TOKENS = 700
+
+VIETNAMESE_DIACRITICS = set(
+    "àáâãèéêìíòóôõùúýăđơưạảấầẩẫậắằẳẵặẹẻẽếềểễệỉịọỏốồổỗộớờởỡợụủứừửữựỳỵỷỹ"
+)
+# Unaccented Vietnamese words that are not English words, matched as whole tokens.
+VIETNAMESE_WORDS = {
+    "la", "va", "cua", "co", "duoc", "khong", "nay", "cho", "voi", "trong", "mot", "cac",
+    "toi", "ban", "hay", "theo", "nhu", "khi", "ve", "tu", "tai", "bao", "nhieu", "gi",
+    "nao", "sao", "doanh", "thu", "bang", "bieu", "quy", "nam", "tang", "giam", "tong",
+    "chi", "phi", "truong", "nhan", "vien", "loi", "nhuan", "ke", "hoach", "rui", "ro",
+    "xu", "huong", "phan", "tram", "chiem", "mang", "kinh",
+}
+ENGLISH_WORDS = {
+    "the", "what", "which", "how", "is", "are", "was", "were", "of", "in", "and", "to",
+    "for", "does", "did", "a", "an", "revenue", "growth", "from", "by", "with", "much", "many",
+}
 
 
 @dataclass
@@ -21,6 +43,10 @@ class Source:
         )
 
     @property
+    def type_emoji(self):
+        return {"table": "📊", "figure": "📈"}.get(self.content_type, "📝")
+
+    @property
     def display_label(self):
         return f"[{self.type_label}] Page {self.page}"
 
@@ -34,21 +60,40 @@ class RAGResponse:
     reranked_count: int
 
 
+@dataclass
+class StreamingRAGResponse:
+    """Sources are known before generation starts; `tokens` yields the answer."""
+    tokens: Iterator[str]
+    sources: list
+    query: str
+    retrieved_count: int
+    reranked_count: int
+    debug: dict = field(default_factory=dict)
+
+
+def _sigmoid(x: float) -> float:
+    return 1.0 / (1.0 + math.exp(-x))
+
+
 class CrossEncoderReranker:
     def __init__(self, config):
         self.model_name = config.reranker.model_name
         self.use_gpu = config.reranker.use_gpu
+        self.ce_weight = config.reranker.ce_weight
         self._model = None
+        self._unavailable = False
 
     def rerank(self, query: str, chunks: list, top_k: int) -> list:
         if not chunks:
             return []
-        if len(chunks) <= top_k:
-            return sorted(chunks, key=lambda c: c.score, reverse=True)
+        if len(chunks) <= top_k or self._unavailable:
+            return self._score_based_rerank(chunks, top_k)
         try:
             return self._cross_encoder_rerank(query, chunks, top_k)
-        except ImportError:
-            logger.warning("sentence-transformers not available, using score ranking")
+        except Exception as e:
+            # Missing package or model download failure (offline): fall back once, don't retry each query.
+            logger.warning(f"Cross-encoder unavailable ({e}); using vector similarity ranking")
+            self._unavailable = True
             return self._score_based_rerank(chunks, top_k)
 
     def _cross_encoder_rerank(self, query: str, chunks: list, top_k: int) -> list:
@@ -61,10 +106,14 @@ class CrossEncoderReranker:
         pairs = [(query, chunk.chunk.text) for chunk in chunks]
         scores = self._model.predict(pairs)
 
+        # Cross-encoder outputs unbounded logits; map them to 0..1 so they can be mixed
+        # with the cosine similarity on the same scale.
         for chunk, ce_score in zip(chunks, scores):
-            chunk.rerank_score = float(ce_score) * 0.7 + chunk.score * 0.3
+            chunk.rerank_score = (
+                self.ce_weight * _sigmoid(float(ce_score)) + (1 - self.ce_weight) * chunk.score
+            )
 
-        return sorted(chunks, key=lambda c: getattr(c, "rerank_score", c.score), reverse=True)[:top_k]
+        return sorted(chunks, key=lambda c: c.final_score, reverse=True)[:top_k]
 
     @staticmethod
     def _score_based_rerank(chunks: list, top_k: int) -> list:
@@ -73,20 +122,17 @@ class CrossEncoderReranker:
 
 class ContextBuilder:
     @staticmethod
-    def build(chunks: list, query: str) -> str:
+    def build(chunks: list, query: str, max_chars: Optional[int] = None) -> str:
+        """Build the prompt context in rerank order (most relevant first), skipping duplicates
+        and stopping before `max_chars` so the prompt fits the model's context window."""
         if not chunks:
             return "No relevant information found in the document."
 
-        tables_and_figures = [c for c in chunks if c.chunk.metadata.get("content_type") in ("table", "figure")]
-        text_chunks = [c for c in chunks if c.chunk.metadata.get("content_type") not in ("table", "figure")]
-
-        ordered = sorted(tables_and_figures, key=lambda c: c.chunk.metadata.get("page", 0))
-        ordered += sorted(text_chunks, key=lambda c: c.chunk.metadata.get("page", 0))
-
         parts = []
         seen = set()
+        total = 0
 
-        for i, rc in enumerate(ordered, 1):
+        for rc in chunks:
             meta = rc.chunk.metadata
             page = meta.get("page", "?")
             content_type = meta.get("content_type", "text")
@@ -99,7 +145,7 @@ class ContextBuilder:
             seen.add(dedup_key)
 
             header = (
-                f"--- Snippet {i} | Page {page} | Type: {content_type.upper()} "
+                f"--- Snippet {len(parts) + 1} | Page {page} | Type: {content_type.upper()} "
                 f"| Source: {source} ---"
             )
             if page_summary:
@@ -108,7 +154,14 @@ class ContextBuilder:
             if content_type == "table":
                 header += "\n[READING INSTRUCTION: Read this table ROW BY ROW. Each row is one record. Do not mix values across rows or columns.]"
 
-            parts.append(f"{header}\n{rc.chunk.text}")
+            part = f"{header}\n{rc.chunk.text}"
+            if max_chars is not None and parts and total + len(part) > max_chars:
+                logger.info(f"Context budget reached; dropped snippets after #{len(parts)}")
+                break
+            if max_chars is not None and not parts and len(part) > max_chars:
+                part = part[:max_chars]
+            parts.append(part)
+            total += len(part) + 2
 
         return "\n\n".join(parts)
 
@@ -127,6 +180,15 @@ class ContextBuilder:
         return sources
 
 
+def detect_language(text: str) -> str:
+    if sum(1 for c in text.lower() if c in VIETNAMESE_DIACRITICS) >= 2:
+        return "vietnamese"
+    tokens = re.findall(r"[a-z]+", text.lower())
+    vi_hits = sum(1 for t in tokens if t in VIETNAMESE_WORDS)
+    en_hits = sum(1 for t in tokens if t in ENGLISH_WORDS)
+    return "vietnamese" if vi_hits >= 2 and vi_hits > en_hits else "english"
+
+
 class RetrievalReasoningLayer:
     def __init__(self, config, knowledge_base, ollama_client):
         self.cfg = config
@@ -135,86 +197,69 @@ class RetrievalReasoningLayer:
         self.reranker = CrossEncoderReranker(config)
         self.context_builder = ContextBuilder()
 
-    def query(self, question: str, filter_source: Optional[str] = None) -> RAGResponse:
+    @property
+    def context_char_budget(self) -> int:
+        tokens = self.cfg.ollama.num_ctx - self.cfg.ollama.max_tokens - PROMPT_OVERHEAD_TOKENS
+        return max(1000, int(tokens * CHARS_PER_TOKEN))
+
+    def _retrieve(self, question, filter_source, top_k, rerank_top_k):
         raw_chunks = self.kb.retrieve(
             query=question,
-            top_k=self.cfg.chroma.top_k,
+            top_k=top_k or self.cfg.chroma.top_k,
             filter_source=filter_source,
         )
-        logger.info(f"Retrieved {len(raw_chunks)} initial chunks")
-
         reranked_chunks = self.reranker.rerank(
             query=question,
             chunks=raw_chunks,
-            top_k=self.cfg.chroma.rerank_top_k,
+            top_k=rerank_top_k or self.cfg.chroma.rerank_top_k,
         )
-        logger.info(f"Reranked to {len(reranked_chunks)} chunks")
+        logger.info(f"Retrieved {len(raw_chunks)} chunks, reranked to {len(reranked_chunks)}")
+        return raw_chunks, reranked_chunks
 
-        context = self.context_builder.build(reranked_chunks, question)
-        answer = self._generate_answer(question, context)
-        sources = self.context_builder.chunks_to_sources(reranked_chunks)
+    def _build_prompt(self, question: str, chunks: list) -> str:
+        from src.config import RAG_PROMPT_TEMPLATE
+        context = self.context_builder.build(chunks, question, max_chars=self.context_char_budget)
+        return RAG_PROMPT_TEMPLATE.format(
+            context=context,
+            question=question,
+            language_instruction=self._get_language_instruction(detect_language(question)),
+        )
 
+    def query(self, question: str, filter_source: Optional[str] = None,
+              top_k: Optional[int] = None, rerank_top_k: Optional[int] = None) -> RAGResponse:
+        from src.config import SYSTEM_PROMPT
+        raw_chunks, reranked_chunks = self._retrieve(question, filter_source, top_k, rerank_top_k)
+        answer = self.ollama.query(prompt=self._build_prompt(question, reranked_chunks), system=SYSTEM_PROMPT)
         return RAGResponse(
             answer=answer,
-            sources=sources,
+            sources=self.context_builder.chunks_to_sources(reranked_chunks),
             query=question,
             retrieved_count=len(raw_chunks),
             reranked_count=len(reranked_chunks),
         )
 
-    def query_stream(self, question: str, filter_source: Optional[str] = None) -> Generator:
-        from src.config import SYSTEM_PROMPT, RAG_PROMPT_TEMPLATE
-        raw_chunks = self.kb.retrieve(question, top_k=self.cfg.chroma.top_k, filter_source=filter_source)
-        reranked_chunks = self.reranker.rerank(question, raw_chunks, self.cfg.chroma.rerank_top_k)
-        context = self.context_builder.build(reranked_chunks, question)
-        language = self._detect_language(question)
-        lang_instruction = self._get_language_instruction(language)
-        prompt = RAG_PROMPT_TEMPLATE.format(
-            context=context,
-            question=question,
-            language_instruction=lang_instruction,
-        )
-        for token in self.ollama.stream(prompt=prompt, system=SYSTEM_PROMPT):
-            yield token
-
-    def _generate_answer(self, question: str, context: str) -> str:
-        from src.config import SYSTEM_PROMPT, RAG_PROMPT_TEMPLATE
-        language = self._detect_language(question)
-        lang_instruction = self._get_language_instruction(language)
-        prompt = RAG_PROMPT_TEMPLATE.format(
-            context=context,
-            question=question,
-            language_instruction=lang_instruction,
-        )
-        return self.ollama.query(
-            prompt=prompt,
-            system=SYSTEM_PROMPT,
-            temperature=self.cfg.ollama.temperature,
-            max_tokens=self.cfg.ollama.max_tokens,
+    def query_stream(self, question: str, filter_source: Optional[str] = None,
+                     top_k: Optional[int] = None, rerank_top_k: Optional[int] = None) -> StreamingRAGResponse:
+        from src.config import SYSTEM_PROMPT
+        raw_chunks, reranked_chunks = self._retrieve(question, filter_source, top_k, rerank_top_k)
+        prompt = self._build_prompt(question, reranked_chunks)
+        return StreamingRAGResponse(
+            tokens=self.ollama.stream(prompt=prompt, system=SYSTEM_PROMPT),
+            sources=self.context_builder.chunks_to_sources(reranked_chunks),
+            query=question,
+            retrieved_count=len(raw_chunks),
+            reranked_count=len(reranked_chunks),
         )
 
     def _detect_language(self, text: str) -> str:
-        vietnamese_chars = "àáâãèéêìíòóôõùúýăđơưạảấầẩẫậắằẳẵặẹẻẽếềểễệỉịọỏốồổỗộớờởỡợụủứừửữựỳỵỷỹ"
-        vietnamese_chars += vietnamese_chars.upper()
-        if sum(1 for c in text if c in vietnamese_chars) >= 2:
-            return "vietnamese"
-        viet_words = [
-            "là","và","của","có","được","không","này","cho","với","trong",
-            "một","các","tôi","bạn","hãy","theo","như","khi","về","từ",
-            "tại","bao","nhiêu","gì","nào","sao","tại sao","doanh thu",
-            "bảng","biểu","quý","năm","tăng","giảm","tổng","chi phí",
-        ]
-        text_lower = text.lower()
-        if any(w in text_lower for w in viet_words):
-            return "vietnamese"
-        return "english"
+        return detect_language(text)
 
     def _get_language_instruction(self, language: str) -> str:
         if language == "vietnamese":
             return (
                 "Câu hỏi được viết bằng TIẾNG VIỆT. "
                 "Bạn BẮT BUỘC phải trả lời HOÀN TOÀN bằng tiếng Việt. "
-                "Không được dùng câu tiếng Anh trong phần trả lời. "
+                "Không được dùng câu tiếng Anh trong phần trả lời và không thêm bản dịch. "
                 "Tên riêng và số liệu giữ nguyên, nhưng tất cả văn bản giải thích phải bằng tiếng Việt."
             )
         return (
@@ -222,9 +267,9 @@ class RetrievalReasoningLayer:
             "You MUST answer entirely in English."
         )
 
-    def get_retrieval_debug(self, question: str) -> dict:
-        raw = self.kb.retrieve(question, top_k=self.cfg.chroma.top_k)
-        reranked = self.reranker.rerank(question, raw, self.cfg.chroma.rerank_top_k)
+    def get_retrieval_debug(self, question: str, filter_source: Optional[str] = None,
+                            top_k: Optional[int] = None, rerank_top_k: Optional[int] = None) -> dict:
+        raw, reranked = self._retrieve(question, filter_source, top_k, rerank_top_k)
         return {
             "query": question,
             "initial_retrieval": [
@@ -240,7 +285,7 @@ class RetrievalReasoningLayer:
                 {
                     "text": c.chunk.text[:200],
                     "original_score": round(c.score, 4),
-                    "rerank_score": round(getattr(c, "rerank_score", c.score), 4),
+                    "rerank_score": round(c.final_score, 4),
                     "type": c.chunk.metadata.get("content_type"),
                     "page": c.chunk.metadata.get("page"),
                 }
