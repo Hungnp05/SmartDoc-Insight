@@ -1,7 +1,12 @@
 # SmartDoc-Insight Makefile
 # ─────────────────────────
+# Recipes use `python` and Python one-liners so they also work from Git Bash on Windows.
 
-.PHONY: setup run test docker-up docker-down pull-models clean lint
+PYTHON ?= python
+DOC ?= test_data/sample_report.pdf
+
+.PHONY: setup venv run run-dev docker-up docker-down docker-logs pull-models check-models \
+        test test-cov benchmark lint format clean clean-db clean-uploads info
 
 # ── Setup ─────────────────────────────────────────────────────────────────────
 setup:
@@ -9,7 +14,9 @@ setup:
 	bash scripts/setup.sh
 
 venv:
-	python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
+	$(PYTHON) -m venv .venv
+	@echo "Activate with 'source .venv/bin/activate' (Linux/Mac) or '.venv\\Scripts\\activate' (Windows),"
+	@echo "then run: pip install -r requirements.txt"
 
 # ── Run ───────────────────────────────────────────────────────────────────────
 run:
@@ -49,37 +56,34 @@ check-models:
 
 # ── Testing ───────────────────────────────────────────────────────────────────
 test:
-	pytest tests/ -v --tb=short
+	$(PYTHON) -m pytest tests/ -v --tb=short
 
 test-cov:
-	pytest tests/ -v --tb=short --cov=src --cov-report=term-missing
+	$(PYTHON) -m pytest tests/ -v --tb=short --cov=src --cov-report=term-missing
 
 benchmark:
-	@echo "Running benchmark (requires a PDF document)..."
-	python scripts/benchmark.py --doc $(DOC) --output benchmark_results.json
+	@echo "Running benchmark on $(DOC) (requires Ollama + models)..."
+	$(PYTHON) scripts/benchmark.py --doc $(DOC) --output benchmark_results.json
 
 # ── Code Quality ──────────────────────────────────────────────────────────────
 lint:
-	ruff check src/ app/ tests/
-	ruff format --check src/ app/ tests/
+	$(PYTHON) -m ruff check src/ app/ tests/ scripts/
 
 format:
-	ruff format src/ app/ tests/
+	$(PYTHON) -m ruff format src/ app/ tests/ scripts/
 
 # ── Cleanup ───────────────────────────────────────────────────────────────────
 clean:
-	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; true
-	find . -type f -name "*.pyc" -delete 2>/dev/null; true
-	find . -type d -name ".pytest_cache" -exec rm -rf {} + 2>/dev/null; true
+	$(PYTHON) -c "import pathlib, shutil; [shutil.rmtree(p, ignore_errors=True) for n in ('__pycache__', '.pytest_cache') for p in pathlib.Path('.').rglob(n) if '.venv' not in p.parts]"
 
 clean-db:
 	@echo "Clearing ChromaDB..."
-	rm -rf data/chroma_db/*
+	$(PYTHON) -c "import shutil; shutil.rmtree('data/chroma_db', ignore_errors=True)"
 	@echo "Database cleared."
 
 clean-uploads:
 	@echo "Clearing uploaded files..."
-	rm -rf data/uploads/*
+	$(PYTHON) -c "import pathlib; [p.unlink() for p in pathlib.Path('data/uploads').glob('*') if p.is_file()]"
 	@echo "Uploads cleared."
 
 # ── Info ──────────────────────────────────────────────────────────────────────
@@ -94,4 +98,4 @@ info:
 	@echo "  Vision: llava:7b"
 	@echo "  Embed:  nomic-embed-text"
 	@echo ""
-	@echo "Tech Stack: Python · PaddleOCR · ChromaDB · LangChain · Ollama · Streamlit"
+	@echo "Tech Stack: Python · PyMuPDF · ChromaDB · sentence-transformers · Ollama · Streamlit"
