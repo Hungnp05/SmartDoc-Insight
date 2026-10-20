@@ -32,3 +32,5 @@ htmlcov/
 .streamlit/
 *.sqlite3
 *.db
+# Benchmark output
+benchmark_results.json
