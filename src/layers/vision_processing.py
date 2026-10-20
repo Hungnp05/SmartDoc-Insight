@@ -1,5 +1,21 @@
+"""
+Layer A: Vision Processing
+──────────────────────────
+Turns a PDF or image into typed regions (text / table / figure).
+
+PDF pages:
+  - Tables: PyMuPDF `find_tables()` → Markdown with the header row and the caption above it.
+  - Figures: vector drawing clusters (`cluster_drawings()`) and raster images are rendered
+    and described by the vision model, together with the text labels inside the chart.
+  - Text: remaining text blocks, grouped in reading order.
+  - Pages without a text layer (scans) are OCR'd.
+Image files: OCR for the text, plus a vision-model description of the whole image.
+
+Model calls are batched by phase (layout → all figure descriptions → all page summaries)
+so Ollama swaps the vision and text models in VRAM once instead of once per page.
+"""
+
 import io
-import re
 import base64
 import logging
 from pathlib import Path
@@ -11,6 +27,8 @@ from PIL import Image
 import fitz
 
 logger = logging.getLogger(__name__)
+
+TEXT_REGION_MAX_CHARS = 700
 
 
 @dataclass
@@ -26,6 +44,10 @@ class BoundingBox:
     def crop(self, image: np.ndarray) -> np.ndarray:
         return image[self.y1:self.y2, self.x1:self.x2]
 
+    @classmethod
+    def from_rect(cls, rect) -> "BoundingBox":
+        return cls(round(rect[0]), round(rect[1]), round(rect[2]), round(rect[3]))
+
 
 @dataclass
 class DocumentRegion:
@@ -35,6 +57,8 @@ class DocumentRegion:
     page_num: int
     content: str = ""
     raw_image: Optional[np.ndarray] = None
+    caption: str = ""
+    labels: str = ""
 
 
 @dataclass
@@ -55,244 +79,329 @@ class ProcessedDocument:
         return [r for page in self.pages for r in page.regions]
 
 
+class OCREngine:
+    """Lazy PaddleOCR wrapper supporting both the 2.x (`ocr`) and 3.x (`predict`) APIs.
+    Disables itself after the first failure so a missing/broken install costs nothing."""
+
+    def __init__(self, lang: str, enabled: bool = True):
+        self.lang = lang
+        self.enabled = enabled
+        self._engine = None
+
+    def _load(self):
+        from paddleocr import PaddleOCR
+        try:
+            return PaddleOCR(
+                lang=self.lang,
+                use_doc_orientation_classify=False,
+                use_doc_unwarping=False,
+                use_textline_orientation=False,
+            )
+        except (TypeError, ValueError):
+            return PaddleOCR(lang=self.lang, use_angle_cls=True, show_log=False)
+
+    def read_lines(self, image: np.ndarray) -> Optional[list]:
+        """Return recognized text lines in reading order, or None if OCR is unavailable."""
+        if not self.enabled:
+            return None
+        try:
+            if self._engine is None:
+                self._engine = self._load()
+            if hasattr(self._engine, "predict"):
+                lines = []
+                for res in self._engine.predict(image):
+                    lines.extend(res["rec_texts"])
+                return [line for line in lines if line.strip()]
+            result = self._engine.ocr(image, cls=True) or []
+            return [line[1][0] for page in result if page for line in page if line[1][0].strip()]
+        except Exception as e:
+            logger.warning(f"OCR unavailable, falling back to the vision model: {e}")
+            self.enabled = False
+            return None
+
+
 class VisionProcessingLayer:
     def __init__(self, config, ollama_client):
         self.cfg = config.vision
+        self.chunk_cfg = config.chunk
         self.ollama = ollama_client
+        self.ocr = OCREngine(self.cfg.ocr_lang, self.cfg.ocr_enabled)
 
     def process_document(self, file_path, progress_callback=None) -> ProcessedDocument:
         file_path = Path(file_path)
         logger.info(f"Processing: {file_path.name}")
 
-        if file_path.suffix.lower() == ".pdf":
-            pages_data = self._pdf_to_pages(file_path)
-        else:
-            img = self._load_image(file_path)
-            pages_data = [(0, img, "", [])]
-
-        doc = ProcessedDocument(source_file=file_path.name, total_pages=len(pages_data))
-
-        for idx, page_tuple in enumerate(pages_data):
-            page_num, page_img, page_text, page_blocks = page_tuple
+        def progress(idx, total, msg):
             if progress_callback:
-                progress_callback(idx, len(pages_data), f"Analyzing page {page_num + 1}...")
-            processed_page = self._process_page(page_img, page_num, page_text, page_blocks)
-            doc.pages.append(processed_page)
+                progress_callback(idx, total, msg)
 
-        total = len(doc.all_regions())
+        # Phase 1: layout (no model calls except OCR)
+        if file_path.suffix.lower() == ".pdf":
+            with fitz.open(str(file_path)) as pdf:
+                total = len(pdf)
+                pages = []
+                for page in pdf:
+                    progress(page.number, total, f"Analyzing layout of page {page.number + 1}...")
+                    pages.append(self._analyze_pdf_page(page))
+        else:
+            progress(0, 1, "Analyzing image...")
+            pages = [self._analyze_image(self._load_image(file_path))]
+
+        doc = ProcessedDocument(source_file=file_path.name, total_pages=len(pages), pages=pages)
+
+        # Phase 2: vision model for every figure
+        figures = [r for r in doc.all_regions() if r.region_type == "figure" and not r.content]
+        for i, region in enumerate(figures):
+            progress(i, len(figures), f"Describing figure on page {region.page_num + 1} with the vision model...")
+            region.content = self._describe_figure(region)
+
+        # Phase 3: text model for page summaries
+        for i, page in enumerate(doc.pages):
+            page.regions = [r for r in page.regions if r.content and len(r.content.strip()) > 10]
+            page.full_text = self._build_page_text(page.regions)
+            if self.cfg.page_summary_enabled:
+                progress(i, len(doc.pages), f"Summarizing page {page.page_num + 1}...")
+                page.page_summary = self._generate_page_summary(page.full_text)
+
         region_types = {}
         for r in doc.all_regions():
             region_types[r.region_type] = region_types.get(r.region_type, 0) + 1
-        logger.info(f"Done: {len(doc.pages)} pages, {total} regions — {region_types}")
+        logger.info(f"Done: {len(doc.pages)} pages, {len(doc.all_regions())} regions — {region_types}")
         return doc
 
-    def _pdf_to_pages(self, pdf_path: Path):
-        dpi = self.cfg.pdf_dpi
-        zoom = dpi / 72.0
-        mat = fitz.Matrix(zoom, zoom)
-        result = []
-        with fitz.open(str(pdf_path)) as doc:
-            for page_num in range(len(doc)):
-                page = doc[page_num]
-                pix = page.get_pixmap(matrix=mat, alpha=False)
-                img_array = np.frombuffer(pix.samples, dtype=np.uint8)
-                img = img_array.reshape(pix.height, pix.width, 3)
-                text = page.get_text("text")
-                blocks = page.get_text("dict")["blocks"]
-                result.append((page_num, img, text, blocks))
-        return result
+    # PDF pages
+
+    def _analyze_pdf_page(self, page) -> ProcessedPage:
+        page_num = page.number
+        processed = ProcessedPage(page_num=page_num)
+
+        text_blocks = []
+        image_rects = []
+        for block in page.get_text("dict")["blocks"]:
+            if block.get("type", 0) == 1:
+                image_rects.append(fitz.Rect(block["bbox"]))
+                continue
+            lines = []
+            for line in block.get("lines", []):
+                line_text = " ".join(span.get("text", "") for span in line.get("spans", [])).strip()
+                if line_text:
+                    lines.append(line_text)
+            if lines:
+                text_blocks.append({"text": "\n".join(lines), "rect": fitz.Rect(block["bbox"])})
+
+        tables = self._find_tables(page)
+        table_rects = [rect for rect, _ in tables]
+
+        if not text_blocks and not tables:
+            processed.regions = self._analyze_scanned_page(page)
+            return processed
+
+        figure_cores = self._find_figure_rects(page, image_rects, table_rects)
+        # Axis labels and legends sit just outside the drawing cluster; pad the figure area
+        # so they are rendered with the chart and attached to it as labels.
+        pad = self.cfg.figure_padding
+        figure_rects = [(r + (-pad, -pad, pad, pad)) & page.rect for r in figure_cores]
+
+        body_blocks = []
+        figure_labels = {i: [] for i in range(len(figure_rects))}
+        for tb in text_blocks:
+            center = (tb["rect"].tl + tb["rect"].br) / 2
+            if any(center in r for r in table_rects):
+                continue
+            fig_idx = next((i for i, r in enumerate(figure_rects) if center in r), None)
+            if fig_idx is not None and self._is_label_block(tb["text"]):
+                figure_labels[fig_idx].append(tb["text"].replace("\n", " "))
+                continue
+            body_blocks.append(tb)
+
+        regions = []
+        for rect, markdown in tables:
+            caption = self._find_caption(rect, body_blocks, below=False)
+            for part in self._split_table(markdown):
+                content = f"{caption}\n\n{part}" if caption else part
+                regions.append(DocumentRegion(
+                    region_type="table",
+                    bbox=BoundingBox.from_rect(rect),
+                    confidence=0.95,
+                    page_num=page_num,
+                    content=content,
+                    caption=caption,
+                ))
+
+        for i, rect in enumerate(figure_rects):
+            regions.append(DocumentRegion(
+                region_type="figure",
+                bbox=BoundingBox.from_rect(rect),
+                confidence=0.9,
+                page_num=page_num,
+                raw_image=self._render_clip(page, rect),
+                caption=self._find_caption(figure_cores[i], body_blocks, below=None),
+                labels=" | ".join(figure_labels[i]),
+            ))
+
+        regions.extend(self._group_text_blocks(body_blocks, page_num))
+        regions.sort(key=lambda r: (r.bbox.y1, r.bbox.x1))
+        processed.regions = regions
+        return processed
+
+    def _find_tables(self, page) -> list:
+        """Return [(rect, markdown)] for every table PyMuPDF detects on the page."""
+        try:
+            found = page.find_tables()
+        except Exception as e:
+            logger.warning(f"Table detection failed on page {page.number + 1}: {e}")
+            return []
+        tables = []
+        for table in found.tables:
+            if table.row_count < 2 or table.col_count < 2:
+                continue
+            markdown = self._clean_table_markdown(table.to_markdown())
+            if markdown:
+                tables.append((fitz.Rect(table.bbox), markdown))
+        return tables
+
+    @staticmethod
+    def _clean_table_markdown(markdown: str) -> str:
+        markdown = markdown.replace("**", "").replace("<br>", " ")
+        return "\n".join(line.strip() for line in markdown.strip().splitlines() if line.strip())
+
+    def _split_table(self, markdown: str) -> list:
+        """Split an oversized table by rows, repeating the header (first 2 lines) in every part."""
+        max_chars = self.chunk_cfg.table_max_chars
+        if len(markdown) <= max_chars:
+            return [markdown]
+        lines = markdown.splitlines()
+        header, rows = lines[:2], lines[2:]
+        header_len = sum(len(line) + 1 for line in header)
+        parts, current, current_len = [], [], header_len
+        for row in rows:
+            if current and current_len + len(row) + 1 > max_chars:
+                parts.append("\n".join(header + current))
+                current, current_len = [], header_len
+            current.append(row)
+            current_len += len(row) + 1
+        if current:
+            parts.append("\n".join(header + current))
+        return parts
+
+    def _find_figure_rects(self, page, image_rects, table_rects) -> list:
+        candidates = list(image_rects)
+        try:
+            candidates.extend(fitz.Rect(r) for r in page.cluster_drawings())
+        except Exception as e:
+            logger.debug(f"cluster_drawings unavailable on page {page.number + 1}: {e}")
+
+        rects = []
+        for rect in candidates:
+            rect = rect & page.rect
+            if rect.width < self.cfg.min_figure_width or rect.height < self.cfg.min_figure_height:
+                continue
+            # Table borders are drawings too; skip clusters that are mostly a table.
+            if any(abs(rect & t) > 0.5 * abs(rect) for t in table_rects):
+                continue
+            rects.append(rect)
+
+        merged = []
+        for rect in sorted(rects, key=lambda r: abs(r), reverse=True):
+            for i, existing in enumerate(merged):
+                if abs(rect & existing) > 0.3 * min(abs(rect), abs(existing)):
+                    merged[i] = existing | rect
+                    break
+            else:
+                merged.append(rect)
+        return sorted(merged, key=lambda r: (r.y0, r.x0))
+
+    def _is_label_block(self, text: str) -> bool:
+        """Short lines (axis ticks, legend entries) rather than a paragraph."""
+        return all(len(line) <= self.cfg.max_label_chars for line in text.splitlines())
+
+    def _find_caption(self, rect, blocks, below: Optional[bool]) -> str:
+        """Nearest text block just above (below=False), just below (True) or both (None) of rect."""
+        margin = self.cfg.caption_margin
+        nearest = {"above": None, "below": None}
+        for tb in blocks:
+            r = tb["rect"]
+            if r.x1 < rect.x0 or r.x0 > rect.x1:
+                continue
+            for side, gap in (("above", rect.y0 - r.y1), ("below", r.y0 - rect.y1)):
+                if 0 <= gap <= margin and (nearest[side] is None or gap < nearest[side][0]):
+                    nearest[side] = (gap, tb["text"])
+        sides = {False: ["above"], True: ["below"], None: ["above", "below"]}[below]
+        return "\n".join(nearest[s][1].replace("\n", " ") for s in sides if nearest[s])
+
+    def _render_clip(self, page, rect) -> np.ndarray:
+        pix = page.get_pixmap(clip=rect, dpi=self.cfg.pdf_dpi, alpha=False)
+        return self._pixmap_to_array(pix)
+
+    def _analyze_scanned_page(self, page) -> list:
+        pix = page.get_pixmap(dpi=self.cfg.pdf_dpi, alpha=False)
+        return self._analyze_image(self._pixmap_to_array(pix), page.number, describe_whole=False).regions
+
+    @staticmethod
+    def _pixmap_to_array(pix) -> np.ndarray:
+        img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.stride)
+        return img[:, : pix.width * pix.n].reshape(pix.height, pix.width, pix.n).copy()
+
+    # Images
 
     def _load_image(self, path: Path) -> np.ndarray:
         return np.array(Image.open(path).convert("RGB"))
 
-    def _process_page(self, page_img, page_num, page_text="", page_blocks=None):
+    def _analyze_image(self, img: np.ndarray, page_num: int = 0, describe_whole: bool = True) -> ProcessedPage:
+        """OCR the text; describe the whole image with the vision model when it is an image
+        upload (likely a chart/figure) or when OCR is unavailable."""
         processed = ProcessedPage(page_num=page_num)
-        regions = self._extract_regions(page_blocks, page_img, page_num, page_text)
-        for region in regions:
-            if region.content and len(region.content.strip()) > 10:
-                processed.regions.append(region)
-        processed.full_text = self._build_page_text(processed.regions)
-        processed.page_summary = self._generate_page_summary(processed.regions)
+        h, w = img.shape[:2]
+        lines = self.ocr.read_lines(img)
+        if lines:
+            processed.regions.extend(self._split_text_into_regions("\n".join(lines), page_num, w, h))
+        if describe_whole or lines is None:
+            processed.regions.append(DocumentRegion(
+                region_type="figure",
+                bbox=BoundingBox(0, 0, w, h),
+                confidence=0.8,
+                page_num=page_num,
+                raw_image=img,
+                labels=" | ".join(lines or [])[:1500],
+            ))
         return processed
 
-    def _extract_regions(self, blocks, page_img, page_num, page_text):
-        h, w = page_img.shape[:2]
+    # Text grouping
 
-        if not blocks and not page_text:
-            return []
-
-        if not blocks:
-            return self._split_text_into_regions(page_text, page_img, page_num)
-
-        text_blocks = []
-        image_blocks = []
-
-        for block in blocks:
-            btype = block.get("type", 0)
-            if btype == 1:
-                image_blocks.append(block)
-            elif btype == 0:
-                lines_text = []
-                for line in block.get("lines", []):
-                    line_text = " ".join(
-                        span.get("text", "") for span in line.get("spans", [])
-                    ).strip()
-                    if line_text:
-                        lines_text.append(line_text)
-                if lines_text:
-                    text_blocks.append({
-                        "text": "\n".join(lines_text),
-                        "bbox": block.get("bbox", [0, 0, w, h]),
-                    })
-
+    def _group_text_blocks(self, blocks, page_num) -> list:
         regions = []
-        regions.extend(self._group_text_blocks(text_blocks, page_num, w, h))
-        regions.extend(self._process_image_blocks(image_blocks, page_img, page_num, w, h))
-        regions.sort(key=lambda r: (r.bbox.y1, r.bbox.x1))
-        return regions
+        current, current_len = [], 0
 
-    def _group_text_blocks(self, text_blocks, page_num, w, h):
-        regions = []
-        current_text = []
-        current_len = 0
-
-        def flush_text():
-            if current_text:
+        def flush():
+            if current:
+                rect = fitz.Rect(current[0]["rect"])
+                for tb in current[1:]:
+                    rect |= tb["rect"]
                 regions.append(DocumentRegion(
                     region_type="text",
-                    bbox=BoundingBox(0, 0, w, h),
+                    bbox=BoundingBox.from_rect(rect),
                     confidence=1.0,
                     page_num=page_num,
-                    content="\n".join(current_text),
+                    content="\n".join(tb["text"] for tb in current),
                 ))
-                current_text.clear()
+                current.clear()
 
-        for tb in text_blocks:
-            block_text = tb["text"].strip()
-            if not block_text:
-                continue
-
-            if self._is_table_block(block_text):
-                flush_text()
+        for tb in sorted(blocks, key=lambda b: (b["rect"].y0, b["rect"].x0)):
+            if current_len + len(tb["text"]) > TEXT_REGION_MAX_CHARS and current:
+                flush()
                 current_len = 0
-                last_table = next(
-                    (r for r in reversed(regions) if r.region_type == "table" and r.page_num == page_num),
-                    None
-                )
-                if last_table and self._is_continuation(last_table.content, block_text):
-                    last_table.content += "\n" + block_text
-                else:
-                    markdown = self._rows_to_markdown(block_text)
-                    regions.append(DocumentRegion(
-                        region_type="table",
-                        bbox=BoundingBox(0, 0, w, h),
-                        confidence=0.9,
-                        page_num=page_num,
-                        content=markdown,
-                    ))
-                continue
-
-            if current_len + len(block_text) > 700 and current_text:
-                flush_text()
-                current_len = 0
-
-            current_text.append(block_text)
-            current_len += len(block_text)
-
-        flush_text()
+            current.append(tb)
+            current_len += len(tb["text"])
+        flush()
         return regions
 
-    def _process_image_blocks(self, image_blocks, page_img, page_num, w, h):
-        regions = []
-        for block in image_blocks:
-            bbox = block.get("bbox", [0, 0, w, h])
-            x0, y0, x1, y1 = bbox[0], bbox[1], bbox[2], bbox[3]
-            img_x0 = max(0, min(int(x0 * w / 595), w))
-            img_y0 = max(0, min(int(y0 * h / 842), h))
-            img_x1 = max(0, min(int(x1 * w / 595), w))
-            img_y1 = max(0, min(int(y1 * h / 842), h))
-            if img_x1 - img_x0 < 20 or img_y1 - img_y0 < 20:
-                continue
-            bounding = BoundingBox(img_x0, img_y0, img_x1, img_y1)
-            crop = bounding.crop(page_img)
-            description = self._describe_figure_crop(crop, page_num)
-            if description:
-                regions.append(DocumentRegion(
-                    region_type="figure",
-                    bbox=bounding,
-                    confidence=0.9,
-                    page_num=page_num,
-                    content=description,
-                    raw_image=crop,
-                ))
-        return regions
-
-    def _is_table_block(self, text: str) -> bool:
-        lines = [l.strip() for l in text.split("\n") if l.strip()]
-        if len(lines) < 2:
-            return False
-
-        if sum(1 for l in lines if l.count("|") >= 2) >= 2:
-            return True
-
-        if sum(1 for l in lines if "\t" in l and l.count("\t") >= 2) >= 2:
-            return True
-
-        numeric_lines = sum(
-            1 for l in lines
-            if sum(1 for t in re.split(r"[\s\t]+", l) if re.search(r"\d", t)) >= 3
-        )
-        if numeric_lines >= max(2, len(lines) * 0.5):
-            return True
-
-        if sum(1 for l in lines if "%" in l) >= 2 and len(lines) >= 3:
-            return True
-
-        return False
-
-    def _is_continuation(self, existing: str, new_block: str) -> bool:
-        existing_lines = existing.strip().split("\n")
-        new_lines = new_block.strip().split("\n")
-        if not existing_lines or not new_lines:
-            return False
-        last = existing_lines[-1]
-        first = new_lines[0]
-        last_cols = last.count("|") if "|" in last else last.count("\t")
-        new_cols = first.count("|") if "|" in first else first.count("\t")
-        return abs(last_cols - new_cols) <= 1
-
-    def _rows_to_markdown(self, text: str) -> str:
-        lines = [l.strip() for l in text.split("\n") if l.strip()]
-        if not lines:
-            return text
-
-        if any("|" in l for l in lines):
-            return text
-
-        result = []
-        for i, line in enumerate(lines):
-            if "\t" in line:
-                cells = [c.strip() for c in line.split("\t")]
-            else:
-                cells = [c.strip() for c in re.split(r"  {2,}", line) if c.strip()]
-            if not cells:
-                cells = [line]
-            result.append("| " + " | ".join(cells) + " |")
-            if i == 0:
-                result.append("|" + "|".join([" --- " for _ in cells]) + "|")
-
-        return "\n".join(result)
-
-    def _split_text_into_regions(self, page_text, page_img, page_num):
-        h, w = page_img.shape[:2]
-        if not page_text or not page_text.strip():
-            return []
-        lines = [l.strip() for l in page_text.split("\n") if l.strip()]
+    def _split_text_into_regions(self, text, page_num, w, h) -> list:
+        lines = [line.strip() for line in text.split("\n") if line.strip()]
         chunks, current, current_len = [], [], 0
         for line in lines:
             current.append(line)
             current_len += len(line)
-            if current_len > 700:
+            if current_len > TEXT_REGION_MAX_CHARS:
                 chunks.append("\n".join(current))
                 current, current_len = [], 0
         if current:
@@ -302,31 +411,41 @@ class VisionProcessingLayer:
             DocumentRegion(
                 region_type="text",
                 bbox=BoundingBox(0, i * chunk_h, w, min((i + 1) * chunk_h, h)),
-                confidence=1.0,
+                confidence=0.85,
                 page_num=page_num,
                 content=chunk,
             )
             for i, chunk in enumerate(chunks)
         ]
 
-    def _describe_figure_crop(self, figure_img: np.ndarray, page_num: int) -> str:
+    # Model calls
+
+    def _describe_figure(self, region: DocumentRegion) -> str:
+        from src.config import CHART_DESCRIPTION_PROMPT, CHART_LABELS_HINT
+        prompt = CHART_DESCRIPTION_PROMPT
+        if region.caption or region.labels:
+            prompt += CHART_LABELS_HINT.format(labels="\n".join(filter(None, [region.caption, region.labels])))
+
+        description = ""
         try:
-            from src.config import CHART_DESCRIPTION_PROMPT
-            img_b64 = self._image_to_base64(figure_img)
             description = self.ollama.vision_query(
-                prompt=CHART_DESCRIPTION_PROMPT,
-                image_base64=img_b64,
+                prompt=prompt,
+                image_base64=self._image_to_base64(region.raw_image),
             )
-            return f"[FIGURE - Page {page_num + 1}]\n{description}"
         except Exception as e:
-            logger.error(f"Figure description failed: {e}")
-            return ""
+            logger.error(f"Figure description failed on page {region.page_num + 1}: {e}")
+
+        # Keep caption and labels even when the vision model fails, so the chart stays searchable.
+        parts = [p for p in (region.caption, description) if p]
+        if region.labels:
+            parts.append(f"Labels: {region.labels}")
+        return "\n".join(parts)
 
     @staticmethod
     def _image_to_base64(img: np.ndarray) -> str:
         pil_img = Image.fromarray(img)
         buffer = io.BytesIO()
-        pil_img.save(buffer, format="JPEG", quality=85)
+        pil_img.save(buffer, format="PNG")
         return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
     def _build_page_text(self, regions) -> str:
@@ -337,8 +456,8 @@ class VisionProcessingLayer:
                 parts.append(f"{prefix}{r.content}")
         return "\n\n".join(parts)
 
-    def _generate_page_summary(self, regions) -> str:
-        text_sample = self._build_page_text(regions)[:1500]
+    def _generate_page_summary(self, page_text: str) -> str:
+        text_sample = page_text[:1500]
         if not text_sample.strip():
             return "Empty page"
         try:
@@ -347,5 +466,6 @@ class VisionProcessingLayer:
                 system="You are a document summarization assistant. Reply in 1-2 concise sentences only.",
             )
             return summary.strip()
-        except Exception:
-            return text_sample[:200].replace("\n", " ") + "..."
+        except Exception as e:
+            logger.warning(f"Page summary failed: {e}")
+            return ""
