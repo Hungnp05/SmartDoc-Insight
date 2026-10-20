@@ -13,6 +13,14 @@ from typing import Generator, Optional
 logger = logging.getLogger(__name__)
 
 
+class OllamaError(RuntimeError):
+    pass
+
+
+def _normalize_model_name(name: str) -> str:
+    return name if ":" in name else f"{name}:latest"
+
+
 class OllamaClient:
     """
     Unified client for all Ollama model interactions.
@@ -21,6 +29,7 @@ class OllamaClient:
     def __init__(self, config):
         self.cfg = config.ollama
         self.base_url = self.cfg.base_url.rstrip("/")
+        self._legacy_embed_api = False
         self._check_connection()
 
     # Connection
@@ -41,9 +50,11 @@ class OllamaClient:
         except Exception:
             return []
 
-    def is_model_available(self, model_name: str) -> bool:
-        available = self.list_models()
-        return any(model_name in m for m in available)
+    def is_model_available(self, model_name: str, available: Optional[list] = None) -> bool:
+        if available is None:
+            available = self.list_models()
+        wanted = _normalize_model_name(model_name)
+        return any(_normalize_model_name(m) == wanted for m in available)
 
     # Text Generation
 
@@ -56,13 +67,12 @@ class OllamaClient:
         max_tokens: Optional[int] = None,
     ) -> str:
         """Single-turn text completion."""
-        model = model or self.cfg.llm_model
         payload = self._build_payload(
-            model=model,
+            model=model or self.cfg.llm_model,
             prompt=prompt,
             system=system,
-            temperature=temperature or self.cfg.temperature,
-            max_tokens=max_tokens or self.cfg.max_tokens,
+            temperature=temperature,
+            max_tokens=max_tokens,
             stream=False,
         )
 
@@ -77,7 +87,7 @@ class OllamaClient:
         except requests.exceptions.Timeout:
             raise TimeoutError(f"Ollama timeout after {self.cfg.timeout}s")
         except Exception as e:
-            raise RuntimeError(f"Ollama query failed: {e}")
+            raise OllamaError(f"Ollama query failed: {e}")
 
     def stream(
         self,
@@ -85,33 +95,41 @@ class OllamaClient:
         system: Optional[str] = None,
         model: Optional[str] = None,
         temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
     ) -> Generator[str, None, None]:
         """Streaming text generation — yields tokens."""
-        model = model or self.cfg.llm_model
         payload = self._build_payload(
-            model=model,
+            model=model or self.cfg.llm_model,
             prompt=prompt,
             system=system,
-            temperature=temperature or self.cfg.temperature,
-            max_tokens=self.cfg.max_tokens,
+            temperature=temperature,
+            max_tokens=max_tokens,
             stream=True,
         )
 
-        with requests.post(
-            f"{self.base_url}/api/generate",
-            json=payload,
-            stream=True,
-            timeout=self.cfg.timeout,
-        ) as r:
-            r.raise_for_status()
-            for line in r.iter_lines():
-                if line:
+        try:
+            with requests.post(
+                f"{self.base_url}/api/generate",
+                json=payload,
+                stream=True,
+                timeout=self.cfg.timeout,
+            ) as r:
+                r.raise_for_status()
+                for line in r.iter_lines():
+                    if not line:
+                        continue
                     data = json.loads(line)
+                    if "error" in data:
+                        raise OllamaError(data["error"])
                     token = data.get("response", "")
                     if token:
                         yield token
                     if data.get("done", False):
                         break
+        except requests.exceptions.Timeout:
+            raise TimeoutError(f"Ollama timeout after {self.cfg.timeout}s")
+        except requests.exceptions.RequestException as e:
+            raise OllamaError(f"Ollama stream failed: {e}")
 
     # Vision (LLaVA)
 
@@ -125,9 +143,8 @@ class OllamaClient:
         Send image + text prompt to LLaVA vision model.
         image_base64: base64-encoded image string
         """
-        model = model or self.cfg.vision_model
         payload = {
-            "model": model,
+            "model": model or self.cfg.vision_model,
             "prompt": prompt,
             "images": [image_base64],
             "stream": False,
@@ -146,43 +163,68 @@ class OllamaClient:
             r.raise_for_status()
             return r.json().get("response", "").strip()
         except Exception as e:
-            raise RuntimeError(f"Vision query failed: {e}")
+            raise OllamaError(f"Vision query failed: {e}")
 
     # Embeddings
 
     def embed(self, texts: list[str], model: Optional[str] = None) -> list[list[float]]:
         """
-        Generate embeddings for a list of texts.
-        Uses nomic-embed-text by default.
+        Generate embeddings for a list of texts (one batched request).
+        Raises OllamaError instead of returning placeholder vectors, so a failed
+        embedding never ends up in the vector store.
         """
+        if not texts:
+            return []
         model = model or self.cfg.embed_model
+
+        if not self._legacy_embed_api:
+            r = self._post_embed("/api/embed", {"model": model, "input": texts})
+            if r.status_code != 404:
+                self._raise_for_status(r, "Embedding failed")
+                embeddings = r.json().get("embeddings", [])
+                if len(embeddings) != len(texts):
+                    raise OllamaError(
+                        f"Embedding failed: expected {len(texts)} vectors, got {len(embeddings)}"
+                    )
+                return embeddings
+            # Ollama < 0.3 has no batch endpoint.
+            self._legacy_embed_api = True
+
         embeddings = []
-
         for text in texts:
-            try:
-                r = requests.post(
-                    f"{self.base_url}/api/embeddings",
-                    json={"model": model, "prompt": text},
-                    timeout=30,
-                )
-                r.raise_for_status()
-                emb = r.json().get("embedding", [])
-                embeddings.append(emb)
-            except Exception as e:
-                logger.error(f"Embedding failed for text: {e}")
-                embeddings.append([0.0] * 768)  # Fallback zero vector
-
+            r = self._post_embed("/api/embeddings", {"model": model, "prompt": text})
+            self._raise_for_status(r, "Embedding failed")
+            emb = r.json().get("embedding")
+            if not emb:
+                raise OllamaError("Embedding failed: empty vector returned")
+            embeddings.append(emb)
         return embeddings
+
+    def _post_embed(self, path: str, payload: dict):
+        try:
+            return requests.post(f"{self.base_url}{path}", json=payload, timeout=self.cfg.timeout)
+        except requests.exceptions.RequestException as e:
+            raise OllamaError(f"Embedding failed: {e}")
+
+    @staticmethod
+    def _raise_for_status(r, message: str):
+        if r.ok:
+            return
+        try:
+            detail = r.json().get("error", r.text)
+        except ValueError:
+            detail = r.text
+        raise OllamaError(f"{message}: HTTP {r.status_code} {detail}")
 
     # Helpers
 
-    @staticmethod
     def _build_payload(
+        self,
         model: str,
         prompt: str,
         system: Optional[str],
-        temperature: float,
-        max_tokens: int,
+        temperature: Optional[float],
+        max_tokens: Optional[int],
         stream: bool,
     ) -> dict:
         payload = {
@@ -190,11 +232,9 @@ class OllamaClient:
             "prompt": prompt,
             "stream": stream,
             "options": {
-                "temperature": temperature,
-                "num_predict": max_tokens,
-                "num_ctx": 4096,          # Context window
-                "num_gpu": -1,            # Use all available GPU layers
-                "num_thread": 4,          # CPU threads for remaining layers
+                "temperature": self.cfg.temperature if temperature is None else temperature,
+                "num_predict": self.cfg.max_tokens if max_tokens is None else max_tokens,
+                "num_ctx": self.cfg.num_ctx,
             },
         }
         if system:
