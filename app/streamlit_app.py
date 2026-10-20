@@ -11,7 +11,7 @@ Features:
 """
 
 import sys
-import time
+import html
 import logging
 from pathlib import Path
 
@@ -21,10 +21,7 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.config import config
-from src.models.ollama_client import OllamaClient
-from src.layers.vision_processing import VisionProcessingLayer
-from src.layers.knowledge_base import KnowledgeBaseLayer
-from src.layers.retrieval_reasoning import RetrievalReasoningLayer
+from src.pipeline import SmartDocPipeline
 
 
 st.set_page_config(
@@ -262,10 +259,10 @@ hr { border-color: var(--border) !important; }
 def init_session():
     defaults = {
         "messages": [],
-        "rag_system": None,
-        "kb_stats": None,
         "active_doc": None,
-        "processing": False,
+        "confirm_clear": False,
+        "top_k": config.chroma.top_k,
+        "rerank_k": config.chroma.rerank_top_k,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -275,44 +272,44 @@ def init_session():
 # System Initialization
 
 @st.cache_resource(show_spinner=False)
-def load_rag_system():
-    """Load all RAG components (cached across reruns)."""
-    ollama = OllamaClient(config)
-    vision = VisionProcessingLayer(config, ollama)
-    kb = KnowledgeBaseLayer(config, ollama)
-    rag = RetrievalReasoningLayer(config, kb, ollama)
-    return ollama, vision, kb, rag
+def load_pipeline() -> SmartDocPipeline:
+    """Load all RAG components once per server process (shared by every session)."""
+    return SmartDocPipeline(config)
 
 
 # Sidebar
 
-def render_sidebar(ollama, kb, rag):
+def render_sidebar(pipeline: SmartDocPipeline):
     with st.sidebar:
         st.markdown("### SmartDoc-Insight")
         st.markdown("---")
 
         # System Status
         st.markdown("#### System Status")
-        models = ollama.list_models()
-
-        llm_ok = ollama.is_model_available(config.ollama.llm_model)
-        vision_ok = ollama.is_model_available(config.ollama.vision_model)
-        embed_ok = ollama.is_model_available(config.ollama.embed_model)
+        status = pipeline.check_models()
 
         for name, ok, model in [
-            ("LLM", llm_ok, config.ollama.llm_model),
-            ("Vision", vision_ok, config.ollama.vision_model),
-            ("Embed", embed_ok, config.ollama.embed_model),
+            ("LLM", status["llm"], config.ollama.llm_model),
+            ("Vision", status["vision"], config.ollama.vision_model),
+            ("Embed", status["embed"], config.ollama.embed_model),
         ]:
             badge_class = "status-online" if ok else "status-offline"
             icon = "●" if ok else "○"
             st.markdown(
-                f'<div class="status-badge {badge_class}">{icon} {name}: {model}</div>',
+                f'<div class="status-badge {badge_class}">{icon} {html.escape(name)}: {html.escape(model)}</div>',
                 unsafe_allow_html=True
             )
 
-        if not all([llm_ok, vision_ok, embed_ok]):
-            st.warning("⚠️ Run in terminal:\n```\nollama pull llama3:8b\nollama pull llava:7b\nollama pull nomic-embed-text\n```")
+        if not all([status["llm"], status["vision"], status["embed"]]):
+            missing = [
+                m for m, ok in [
+                    (config.ollama.llm_model, status["llm"]),
+                    (config.ollama.vision_model, status["vision"]),
+                    (config.ollama.embed_model, status["embed"]),
+                ] if not ok
+            ]
+            commands = "\n".join(f"ollama pull {m}" for m in missing)
+            st.warning(f"⚠️ Ollama is not running or models are missing. Run:\n```\n{commands}\n```")
 
         st.markdown("---")
 
@@ -320,19 +317,21 @@ def render_sidebar(ollama, kb, rag):
         st.markdown("#### Upload Document")
         uploaded_file = st.file_uploader(
             "PDF or Image",
-            type=["pdf", "png", "jpg", "jpeg"],
+            type=config.app.allowed_extensions,
             label_visibility="collapsed",
         )
 
-        if uploaded_file and not st.session_state.processing:
+        if uploaded_file:
+            if pipeline.kb.has_document(uploaded_file.name):
+                st.info(f"`{uploaded_file.name}` is already indexed; processing replaces it.")
             if st.button("Process Document", use_container_width=True):
-                process_document(uploaded_file, kb)
+                process_document(uploaded_file, pipeline)
 
         st.markdown("---")
 
         # Knowledge Base Stats
         st.markdown("#### Knowledge Base")
-        stats = kb.get_stats()
+        stats = pipeline.stats()
 
         col1, col2 = st.columns(2)
         with col1:
@@ -356,7 +355,7 @@ def render_sidebar(ollama, kb, rag):
                     st.markdown(f"- Chunks: {doc['chunk_count']}")
 
                     # Filter option
-                    if st.button(f"Chat with this doc", key=f"filter_{doc['source_file']}"):
+                    if st.button("Chat with this doc", key=f"filter_{doc['source_file']}"):
                         st.session_state.active_doc = doc['source_file']
                         st.rerun()
 
@@ -368,17 +367,26 @@ def render_sidebar(ollama, kb, rag):
 
         st.markdown("---")
 
-        # Settings
+        # Settings (per session; the shared config is not modified)
         st.markdown("#### ⚙️ Settings")
-        top_k = st.slider("Retrieve Top-K", 3, 15, config.chroma.top_k)
-        rerank_k = st.slider("Re-rank Top-K", 2, 8, config.chroma.rerank_top_k)
-        config.chroma.top_k = top_k
-        config.chroma.rerank_top_k = rerank_k
+        st.slider("Retrieve Top-K", 3, 15, key="top_k")
+        st.slider("Re-rank Top-K", 2, 8, key="rerank_k")
 
-        if st.button("🗑️ Clear Knowledge Base", use_container_width=True):
-            if st.button("⚠️ Confirm Clear", key="confirm_clear"):
-                kb.clear_all()
-                st.success("Knowledge base cleared!")
+        if not st.session_state.confirm_clear:
+            if st.button("🗑️ Clear Knowledge Base", use_container_width=True):
+                st.session_state.confirm_clear = True
+                st.rerun()
+        else:
+            st.warning("Delete every indexed document?")
+            col_yes, col_no = st.columns(2)
+            if col_yes.button("⚠️ Confirm", key="confirm_clear_yes", use_container_width=True):
+                pipeline.clear()
+                st.session_state.confirm_clear = False
+                st.session_state.active_doc = None
+                st.toast("Knowledge base cleared!")
+                st.rerun()
+            if col_no.button("Cancel", key="confirm_clear_no", use_container_width=True):
+                st.session_state.confirm_clear = False
                 st.rerun()
 
         st.markdown("---")
@@ -391,89 +399,50 @@ def render_sidebar(ollama, kb, rag):
 
 # Document Processing
 
-def process_document(uploaded_file, kb):
+def process_document(uploaded_file, pipeline: SmartDocPipeline):
     """Handle document upload and processing pipeline."""
-    st.session_state.processing = True
-
-    # Save to disk
-    save_path = config.paths["uploads"] / uploaded_file.name
+    save_path = config.paths["uploads"] / Path(uploaded_file.name).name
     with open(save_path, "wb") as f:
         f.write(uploaded_file.getbuffer())
 
-    # Processing UI
     with st.sidebar:
-        progress_container = st.container()
-
-    with progress_container:
         st.markdown("**Processing Pipeline:**")
         status_text = st.empty()
-        progress_bar = st.progress(0)
+        progress_bar = st.progress(0.0)
 
-        steps = [
-            (0.1, "📄 Loading document..."),
-            (0.3, "🔍 Analyzing layout..."),
-            (0.5, "📊 Extracting tables → Markdown..."),
-            (0.65, "📈 Describing charts with LLaVA..."),
-            (0.8, "🔢 Generating embeddings..."),
-            (0.9, "💾 Storing in ChromaDB..."),
-            (1.0, "✅ Complete!"),
-        ]
+    def on_progress(msg, fraction):
+        status_text.markdown(msg)
+        if fraction is not None:
+            progress_bar.progress(min(max(fraction, 0.0), 1.0))
 
-        try:
-            ollama, vision, _, _ = load_rag_system()
+    try:
+        result = pipeline.ingest(save_path, progress_callback=on_progress)
+    except Exception as e:
+        st.sidebar.error(f"❌ Processing failed: {e}")
+        logging.exception("Document processing error")
+        return
 
-            # Vision processing
-            step_idx = 0
-            def update_progress(page_idx, total_pages, msg):
-                nonlocal step_idx
-                frac = min(0.7, (page_idx / max(total_pages, 1)) * 0.7)
-                progress_bar.progress(0.1 + frac)
-                status_text.markdown(f"🔍 {msg}")
+    if result["total_chunks"] == 0:
+        st.sidebar.warning(
+            f"⚠️ No content could be extracted from '{uploaded_file.name}'. "
+            "If it is a scan or an image, install OCR support (requirements-ocr.txt)."
+        )
+        return
 
-            status_text.markdown(steps[0][1])
-            progress_bar.progress(steps[0][0])
-
-            processed_doc = vision.process_document(
-                save_path,
-                progress_callback=update_progress,
-            )
-
-            status_text.markdown("Generating embeddings...")
-            progress_bar.progress(0.8)
-
-            def kb_progress(msg):
-                status_text.markdown(f"{msg}")
-
-            chunk_count = kb.ingest_document(processed_doc, progress_callback=kb_progress)
-
-            progress_bar.progress(1.0)
-            status_text.markdown(f"✅ Done! {chunk_count} chunks indexed")
-
-            st.success(f"✅ '{uploaded_file.name}' processed: {chunk_count} chunks")
-
-            # Summary stats
-            region_types = {}
-            for region in processed_doc.all_regions():
-                region_types[region.region_type] = region_types.get(region.region_type, 0) + 1
-
-            type_summary = " | ".join([f"{k}: {v}" for k, v in region_types.items()])
-            st.info(f"Regions detected: {type_summary}")
-
-        except Exception as e:
-            st.error(f"❌ Processing failed: {e}")
-            logging.exception("Document processing error")
-        finally:
-            st.session_state.processing = False
+    status_text.markdown(f"✅ Done! {result['total_chunks']} chunks indexed")
+    type_summary = " | ".join(f"{k}: {v}" for k, v in result["regions"].items())
+    st.sidebar.success(f"✅ '{uploaded_file.name}' processed: {result['total_chunks']} chunks")
+    st.sidebar.info(f"Regions detected: {type_summary}")
 
 
 # Chat Interface
 
-def render_chat(rag):
+def render_chat(pipeline: SmartDocPipeline):
     """Main chat area with message history and streaming responses."""
 
     # Header
     st.markdown("""
-    <div class="smartdoc-header" 
+    <div class="smartdoc-header"
         style="display: flex; justify-content: center; width: 100%;">
         <div style="text-align: center;">
             <div class="smartdoc-logo">SmartDoc-Insight</div>
@@ -485,74 +454,51 @@ def render_chat(rag):
     </div>
     """, unsafe_allow_html=True)
 
-    # Message History
+    # Message History (rendered as Markdown, never as raw HTML)
     for msg in st.session_state.messages:
-        if msg["role"] == "user":
-            st.markdown(f'<div class="chat-message-user"> {msg["content"]}</div>', unsafe_allow_html=True)
-        else:
-            with st.container():
-                st.markdown(f'<div class="chat-message-assistant">{msg["content"]}</div>', unsafe_allow_html=True)
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+            if msg.get("sources"):
+                render_sources(msg["sources"])
 
-                # Show sources
-                if msg.get("sources"):
-                    render_sources(msg["sources"])
+    prompt = st.chat_input("Ask questions about the document....")
+    if not prompt:
+        return
 
-    # Chat Input
-    if prompt := st.chat_input("Ask questions about the document...."):
-        # Add user message
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        st.markdown(f'<div class="chat-message-user"> {prompt}</div>', unsafe_allow_html=True)
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
 
-        # Check KB has content
-        stats = rag.kb.get_stats()
-        if stats["total_chunks"] == 0:
-            st.warning("⚠️ Knowledge base is empty. Please upload a document first.")
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": "Please upload the document before asking a question.",
-                "sources": []
-            })
+    with st.chat_message("assistant"):
+        if pipeline.stats()["total_chunks"] == 0:
+            answer = "Please upload the document before asking a question."
+            st.markdown(answer)
+            st.session_state.messages.append({"role": "assistant", "content": answer, "sources": []})
             return
 
-        # Generate response with streaming
-        with st.container():
-            response_placeholder = st.empty()
-            full_response = ""
-
-            try:
-                with st.spinner(""):
-                    response = rag.query(
-                        question=prompt,
-                        filter_source=st.session_state.active_doc,
-                    )
-                    full_response = response.answer
-                    sources = response.sources
-
-                    # Show metadata
-                    st.caption(
-                        f"Retrieved: {response.retrieved_count} → "
-                        f"Re-ranked: {response.reranked_count} chunks"
-                    )
-
-                st.markdown(f'<div class="chat-message-assistant">{full_response}</div>',
-                           unsafe_allow_html=True)
-                render_sources(sources)
-
-                # Save to history
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": full_response,
-                    "sources": sources,
-                })
-
-            except Exception as e:
-                error_msg = f"⚠️ Error generating response: {str(e)}"
-                st.error(error_msg)
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": error_msg,
-                    "sources": [],
-                })
+        try:
+            with st.spinner("Searching the document..."):
+                response = pipeline.ask_stream(
+                    prompt,
+                    source_filter=st.session_state.active_doc,
+                    top_k=st.session_state.top_k,
+                    rerank_top_k=st.session_state.rerank_k,
+                )
+            st.caption(
+                f"Retrieved: {response.retrieved_count} → "
+                f"Re-ranked: {response.reranked_count} chunks"
+            )
+            answer = st.write_stream(response.tokens)
+            render_sources(response.sources)
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": answer,
+                "sources": response.sources,
+            })
+        except Exception as e:
+            error_msg = f"⚠️ Error generating response: {e}"
+            st.error(error_msg)
+            st.session_state.messages.append({"role": "assistant", "content": error_msg, "sources": []})
 
 
 def render_sources(sources):
@@ -562,21 +508,22 @@ def render_sources(sources):
 
     st.markdown("**📎 References:**")
 
+    chips = []
     for source in sources:
         type_class = source.content_type if source.content_type in ("table", "figure") else "text"
-        st.markdown(
+        chips.append(
             f'<span class="source-chip {type_class}">'
-            f'Trang {source.page} · {source.content_type.upper()} '
+            f'Trang {source.page} · {html.escape(source.content_type.upper())} '
             f'· {source.score:.0%}'
-            f'</span>',
-            unsafe_allow_html=True,
+            f'</span>'
         )
+    st.markdown("".join(chips), unsafe_allow_html=True)
 
     # Expandable source details
     with st.expander("See the detailed source content", expanded=False):
         for i, source in enumerate(sources, 1):
-            st.markdown(f"**{i}. {getattr(source, 'display_label', 'Source')}** — `{source.source_file}` (Score: {source.score:.4f})")
-            st.markdown(f"> {source.content}")
+            st.markdown(f"**{i}. {source.display_label}** — `{source.source_file}` (Score: {source.score:.4f})")
+            st.markdown(source.content)
             st.markdown("---")
 
 
@@ -586,68 +533,76 @@ def main():
     init_session()
 
     try:
-        ollama, vision, kb, rag = load_rag_system()
+        pipeline = load_pipeline()
     except Exception as e:
         st.error(f"Failed to initialize system: {e}")
         st.info("Make sure Ollama is running: `ollama serve`")
         return
 
-    render_sidebar(ollama, kb, rag)
+    render_sidebar(pipeline)
 
     # Main content tabs
     tab_chat, tab_debug, tab_about = st.tabs(["💬 Chat", "🔬 Debug", "ℹ️ About"])
 
     with tab_chat:
-        render_chat(rag)
+        render_chat(pipeline)
 
     with tab_debug:
-        render_debug(rag)
+        render_debug(pipeline)
 
     with tab_about:
         render_about()
 
 
-def render_debug(rag):
+def render_debug(pipeline: SmartDocPipeline):
     """Debug view: show retrieval pipeline internals."""
     st.markdown("### Retrieval Debug")
     st.markdown("Test the retrieval pipeline and see re-ranking in action.")
+    if st.session_state.active_doc:
+        st.caption(f"Filtering: `{st.session_state.active_doc}`")
 
     debug_query = st.text_input("Test Query:", placeholder="Enter a test question...")
     if st.button("Run Debug Retrieval") and debug_query:
         with st.spinner("Running retrieval..."):
             try:
-                debug_info = rag.get_retrieval_debug(debug_query)
-
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.markdown("**Initial Retrieval (by vector similarity):**")
-                    for item in debug_info["initial_retrieval"]:
-                        st.markdown(f"""
-                        <div style="background:#13141e;border:1px solid #2a2d3e;border-radius:8px;padding:0.75rem;margin:0.4rem 0">
-                            <div style="font-family:Space Mono;font-size:0.65rem;color:#00e5ff">
-                                TYPE: {item['type']} | PAGE: {item['page']} | SCORE: {item['score']:.4f}
-                            </div>
-                            <div style="font-size:0.8rem;color:#8b8fa8;margin-top:0.3rem">{item['text']}...</div>
-                        </div>
-                        """, unsafe_allow_html=True)
-
-                with col2:
-                    st.markdown("**After Re-ranking (cross-encoder):**")
-                    for item in debug_info["after_reranking"]:
-                        improvement = item['rerank_score'] - item['original_score']
-                        color = "#10b981" if improvement > 0 else "#ef4444"
-                        arrow = "↑" if improvement > 0 else "↓"
-                        st.markdown(f"""
-                        <div style="background:#13141e;border:1px solid #2a2d3e;border-radius:8px;padding:0.75rem;margin:0.4rem 0">
-                            <div style="font-family:Space Mono;font-size:0.65rem;color:#7c3aed">
-                                RERANK: {item['rerank_score']:.4f}
-                                <span style="color:{color}"> {arrow}{abs(improvement):.4f}</span>
-                            </div>
-                            <div style="font-size:0.8rem;color:#8b8fa8;margin-top:0.3rem">{item['text']}...</div>
-                        </div>
-                        """, unsafe_allow_html=True)
+                debug_info = pipeline.rag.get_retrieval_debug(
+                    debug_query,
+                    filter_source=st.session_state.active_doc,
+                    top_k=st.session_state.top_k,
+                    rerank_top_k=st.session_state.rerank_k,
+                )
             except Exception as e:
                 st.error(f"Debug failed: {e}")
+                return
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**Initial Retrieval (by vector similarity):**")
+            for item in debug_info["initial_retrieval"]:
+                st.markdown(f"""
+                <div style="background:#13141e;border:1px solid #2a2d3e;border-radius:8px;padding:0.75rem;margin:0.4rem 0">
+                    <div style="font-family:Space Mono;font-size:0.65rem;color:#00e5ff">
+                        TYPE: {html.escape(str(item['type']))} | PAGE: {item['page']} | SCORE: {item['score']:.4f}
+                    </div>
+                    <div style="font-size:0.8rem;color:#8b8fa8;margin-top:0.3rem">{html.escape(item['text'])}...</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+        with col2:
+            st.markdown("**After Re-ranking (cross-encoder):**")
+            for item in debug_info["after_reranking"]:
+                improvement = item['rerank_score'] - item['original_score']
+                color = "#10b981" if improvement > 0 else "#ef4444"
+                arrow = "↑" if improvement > 0 else "↓"
+                st.markdown(f"""
+                <div style="background:#13141e;border:1px solid #2a2d3e;border-radius:8px;padding:0.75rem;margin:0.4rem 0">
+                    <div style="font-family:Space Mono;font-size:0.65rem;color:#7c3aed">
+                        RERANK: {item['rerank_score']:.4f}
+                        <span style="color:{color}"> {arrow}{abs(improvement):.4f}</span>
+                    </div>
+                    <div style="font-size:0.8rem;color:#8b8fa8;margin-top:0.3rem">{html.escape(item['text'])}...</div>
+                </div>
+                """, unsafe_allow_html=True)
 
 
 def render_about():
@@ -661,14 +616,15 @@ def render_about():
 
     | Layer | Component | Purpose |
     |-------|-----------|---------|
-    | A - Vision | PaddleOCR + LLaVA-7B | Layout detection, table→Markdown, chart→text |
-    | B - Knowledge | ChromaDB + nomic-embed | Vector store with enriched metadata |
+    | A - Vision | PyMuPDF + LLaVA-7B (+ optional PaddleOCR) | Table detection → Markdown, chart → text, OCR for scans/images |
+    | B - Knowledge | ChromaDB + nomic-embed-text | Vector store with enriched metadata |
     | C - Reasoning | Cross-encoder + Llama3-8B | Re-rank + generate answers |
     | D - Interface | Streamlit | This UI |
 
     #### Tech Stack
-    `Python` · `PaddleOCR` · `LLaVA-7B` · `Llama3-8B` · `ChromaDB` · `LangChain` · `Ollama` · `Streamlit` · `Docker`
+    `Python` · `PyMuPDF` · `LLaVA-7B` · `Llama3-8B` · `ChromaDB` · `sentence-transformers` · `Ollama` · `Streamlit` · `Docker`
     """)
+
 
 if __name__ == "__main__":
     main()
