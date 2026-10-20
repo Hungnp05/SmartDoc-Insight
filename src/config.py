@@ -5,9 +5,17 @@ import os
 from pathlib import Path
 from dataclasses import dataclass, field
 
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
 ROOT_DIR = Path(__file__).parent.parent
 DATA_DIR = ROOT_DIR / "data"
-CHROMA_DIR = DATA_DIR / "chroma_db"
+CHROMA_DIR = Path(os.getenv("CHROMA_DIR", str(DATA_DIR / "chroma_db")))
 UPLOAD_DIR = DATA_DIR / "uploads"
 CACHE_DIR = DATA_DIR / "cache"
 
@@ -23,29 +31,41 @@ class OllamaConfig:
     embed_model: str = os.getenv("EMBED_MODEL", "nomic-embed-text")
     timeout: int = int(os.getenv("OLLAMA_TIMEOUT", "120"))
     temperature: float = float(os.getenv("LLM_TEMPERATURE", "0.1"))
-    max_tokens: int = int(os.getenv("LLM_MAX_TOKENS", "2048"))
+    max_tokens: int = int(os.getenv("LLM_MAX_TOKENS", "1024"))
+    # Context window sent to Ollama. Llama3 supports 8192; 6144 keeps the KV cache
+    # small enough for 6GB VRAM. The RAG context is trimmed to fit this budget.
+    num_ctx: int = int(os.getenv("LLM_NUM_CTX", "6144"))
 
 
 @dataclass
 class VisionConfig:
-    ocr_lang: str = "vi"
-    ocr_use_gpu: bool = False
     pdf_dpi: int = int(os.getenv("PDF_DPI", "200"))
-    table_confidence: float = 0.7
-    figure_confidence: float = 0.6
+    # OCR for image uploads and scanned PDF pages (requires optional paddleocr).
+    ocr_enabled: bool = _env_bool("OCR_ENABLED", True)
+    ocr_lang: str = os.getenv("OCR_LANG", "vi")
+    # One LLM call per page to build `page_summary` metadata. Disable to speed up ingestion.
+    page_summary_enabled: bool = _env_bool("PAGE_SUMMARY", True)
+    # Drawing clusters smaller than this (PDF points) are ignored (rules, underlines, icons).
+    min_figure_width: float = 80.0
+    min_figure_height: float = 60.0
+    # Text within this distance (points) of a table/figure is treated as its caption.
+    caption_margin: float = 40.0
+    # Padding (points) around a figure for its rendered image and axis/legend labels.
+    figure_padding: float = 25.0
+    # Text blocks inside a figure area longer than this per line are body text, not labels.
+    max_label_chars: int = 60
     REGION_TEXT: str = "text"
     REGION_TITLE: str = "title"
     REGION_TABLE: str = "table"
     REGION_FIGURE: str = "figure"
-    REGION_REFERENCE: str = "reference"
 
 
 @dataclass
 class ChunkConfig:
-    text_chunk_size: int = int(os.getenv("CHUNK_SIZE", "800"))
-    text_chunk_overlap: int = int(os.getenv("CHUNK_OVERLAP", "120"))
-    table_max_tokens: int = 3000
-    chart_max_tokens: int = 600
+    text_chunk_size: int = int(os.getenv("CHUNK_SIZE", "1200"))
+    text_chunk_overlap: int = int(os.getenv("CHUNK_OVERLAP", "150"))
+    # Tables longer than this are split by rows, repeating the header in every part.
+    table_max_chars: int = int(os.getenv("TABLE_MAX_CHARS", "6000"))
     min_chunk_size: int = 40
 
 
@@ -54,9 +74,8 @@ class ChromaConfig:
     persist_dir: str = str(CHROMA_DIR)
     collection_name: str = "smartdoc_knowledge"
     distance_metric: str = "cosine"
-    top_k: int = int(os.getenv("RETRIEVAL_TOP_K", "12"))
-    rerank_top_k: int = int(os.getenv("RERANK_TOP_K", "5"))
-    embedding_dim: int = 768
+    top_k: int = int(os.getenv("RETRIEVAL_TOP_K", "10"))
+    rerank_top_k: int = int(os.getenv("RERANK_TOP_K", "4"))
 
 
 @dataclass
@@ -66,7 +85,8 @@ class RerankerConfig:
         "cross-encoder/ms-marco-MiniLM-L-6-v2"
     )
     use_gpu: bool = False
-    batch_size: int = 32
+    # Weight of the cross-encoder score vs. the vector similarity (both in 0..1).
+    ce_weight: float = 0.7
 
 
 @dataclass
@@ -74,7 +94,6 @@ class AppConfig:
     app_title: str = "SmartDoc-Insight"
     max_upload_size_mb: int = int(os.getenv("MAX_UPLOAD_MB", "50"))
     allowed_extensions: list = field(default_factory=lambda: ["pdf", "png", "jpg", "jpeg"])
-    show_sources: bool = True
 
 
 SYSTEM_PROMPT = """You are SmartDoc-Insight, an intelligent document analysis assistant.
@@ -83,10 +102,11 @@ Your task is to answer questions BASED ON and ONLY BASED ON the provided informa
 Principles:
 1. Use only the information from the provided context. Do not hallucinate or make things up.
 2. If the information is insufficient, clearly state it in the user's language.
-3. When citing tables, read by ROWS — each row is a distinct record. Do not mix values between columns.
+3. When citing tables, read by ROWS — each row is a distinct record. Match each value to its column header. Do not mix values between rows or columns.
 4. When citing charts, describe trends and key data points.
 5. If uncertain about a figure, specify the source: 'According to Table X on Page Y...'.
 6. CRITICAL — Language rule: You MUST reply in the SAME language as the question. If the question is in Vietnamese, your ENTIRE answer must be in Vietnamese. If in English, answer in English. This rule overrides everything else.
+7. Answer directly. Do not repeat the question, do not add translations, and do not mention snippet numbers.
 """
 
 RAG_PROMPT_TEMPLATE = """<context>
@@ -114,6 +134,11 @@ Focus on:
 5. Main conclusions or insights from the data
 
 Provide a concise descriptive response suitable for storage in a knowledge base.
+"""
+
+CHART_LABELS_HINT = """
+Text labels extracted from the chart area (use them to read the axes and values correctly):
+{labels}
 """
 
 
