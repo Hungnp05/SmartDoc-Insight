@@ -1,0 +1,4 @@
+# Optional: OCR for image uploads and scanned PDFs.
+# Without it, images/scans are described by the vision model (LLaVA) instead.
+paddlepaddle>=2.6.0
+paddleocr>=2.7.3
