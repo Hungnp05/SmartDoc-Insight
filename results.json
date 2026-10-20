@@ -1,0 +1,118 @@
+{
+  "summary": {
+    "overall": 0.844,
+    "by_type": {
+      "table": 0.792,
+      "figure": 1.0,
+      "text": 1.0
+    },
+    "process_time_s": 106.4,
+    "total_questions": 8
+  },
+  "results": [
+    {
+      "question": "Doanh thu quy 3 nam 2024 la bao nhieu?",
+      "answer": "Doanh thu quy 3 nam 2024 là bao nhiêu?\n\nTheo Snippet 2, doanh thu quy 3/2024 là 2.550 ty dong.\n\n(Vietnamese: Doanh thu quy 3 năm 2024 là bao nhiêu? Theo Snippet 2, doanh thu quy 3/2024 là 2.550 tỷ đồng.)",
+      "score": 0.667,
+      "latency_s": 64.92,
+      "content_type": "table",
+      "sources": [
+        "text:p2",
+        "text:p1",
+        "text:p1",
+        "text:p3"
+      ]
+    },
+    {
+      "question": "Tang truong doanh thu quy 3 so voi quy 2 la bao nhieu phan tram?",
+      "answer": "Câu trả lời: Theo thông tin trong Snippet 1, doanh thu của công ty SmartViet năm 2024 là VND 8.760 tỷ, tăng 24% so với năm 2023. Doanh thu này được chia thành các mảng kinh doanh khác nhau, bao gồm phát triển phần mềm, dịch vụ IT và công nghệ thông tin.\n\nVậy, để tính tỷ lệ tăng doanh thu của mảng kinh doanh thứ ba (mang bao mat thong tin) so với mảng kinh doanh thứ hai (mang dich vu dam may), ta có thể sử dụng thông tin trong Snippet 1: \"Mang bao mat thong tin tang 42% so voi nam truoc\".\n\nTỷ lệ tăng doanh thu của mảng kinh doanh thứ ba so với mảng kinh doanh thứ hai là: (42% - ?)%.\n\nTheo Snippet 1, doanh thu của mảng dịch vụ IT (mang dich vu dam may) tăng 28%. Do đó, tỷ lệ tăng doanh thu của mảng bao mat thong tin so với mảng dịch vụ IT là: (42% - 28%)% = 14%.\n\nVậy, câu trả lời là: Tăng trương doanh thu quy 3 so với quy 2 là 14%.",
+      "score": 0.75,
+      "latency_s": 31.55,
+      "content_type": "table",
+      "sources": [
+        "text:p1",
+        "text:p2",
+        "text:p2",
+        "text:p2"
+      ]
+    },
+    {
+      "question": "Mang kinh doanh nao co ty le tang truong cao nhat trong nam 2024?",
+      "answer": "Mang kinh doanh phan mem doanh nghiep có tỷ lệ tăng trưởng cao nhất trong năm 2024 là 35%.\n\n(Vietnamese translation: The software development business segment has the highest growth rate of 35% in 2024.)",
+      "score": 0.333,
+      "latency_s": 18.21,
+      "content_type": "table",
+      "sources": [
+        "text:p1",
+        "text:p2",
+        "text:p2",
+        "text:p2"
+      ]
+    },
+    {
+      "question": "Tong so nhan vien tinh den cuoi nam 2024 la bao nhieu?",
+      "answer": "Tong so nhan vien tinh den cuoi nam 2024 la 2.412 nhan vien.\n\n(Translation: The total number of employees as of the end of 2024 is 2,412 employees.)",
+      "score": 1.0,
+      "latency_s": 17.55,
+      "content_type": "table",
+      "sources": [
+        "text:p2",
+        "text:p1",
+        "text:p2",
+        "text:p4"
+      ]
+    },
+    {
+      "question": "Chi phi nhan cong chiem bao nhieu phan tram tong chi phi?",
+      "answer": "Chi phi nhan cong chiem bao nhieu phan tram tong chi phi?\n\nTheo bảng tin trong Snippet 1, chi phi nhan cong chiếm 51,4% tổng chi phí.\n\n(Vietnamese)",
+      "score": 1.0,
+      "latency_s": 18.06,
+      "content_type": "table",
+      "sources": [
+        "text:p1",
+        "text:p2",
+        "table:p3",
+        "text:p4"
+      ]
+    },
+    {
+      "question": "Cac rui ro chinh duoc neu trong bao cao la gi?",
+      "answer": "Các rui ro chinh duoc trong bao cáo là:\n\n* Rui ro canh tranh: Thi truong cong nghe thong tin Viet Nam ngay cang co nhieu doi thu trong va ngoai nuoc. Cac tap doan cong nghe nuoc ngoai nhu Microsoft, SAP, Oracle dang day manh xam nhap thi truong Viet Nam voi cac goi giai phap tich hop.\n* Rui ro nhan su: Voi toc do tang truong nhanh, viec thu hut va giu chan nhan tai cong nghe cao la thach thuc lon. Chi phi nhan cong trong nganh IT tang khoang 15-20% moi nam.\n* Rui ro cong nghe: Toc do thay doi cong nghe nhanh doi hoi cong ty phai lien tuc cap nhat va nang cap giai phap.\n\n(Các rui ro chinh duoc là các vấn đề chính được thảo luận trong báo cáo, bao gồm cạnh tranh công nghệ thông tin, thu hút nhân sự và phát triển công nghệ.)",
+      "score": 1.0,
+      "latency_s": 30.6,
+      "content_type": "text",
+      "sources": [
+        "text:p3",
+        "text:p4",
+        "text:p3",
+        "text:p3"
+      ]
+    },
+    {
+      "question": "Ke hoach doanh thu nam 2025 la bao nhieu?",
+      "answer": "Theo báo cáo, Ke hoach 2025 của công ty là tăng doanh thu lên 11.400 tỷ đồng, tăng 30% so với năm 2024 (8.760 tỷ đồng).",
+      "score": 1.0,
+      "latency_s": 18.03,
+      "content_type": "table",
+      "sources": [
+        "text:p1",
+        "text:p4",
+        "text:p2",
+        "text:p3"
+      ]
+    },
+    {
+      "question": "Xu huong tang truong doanh thu tu 2021 den 2024 nhu the nao?",
+      "answer": "Xu huong tang truong doanh thu tu 2021 den 2024 la VND 8.760 ty dong trong nam 2024, tang truong 24% so voi nam 2023.\n\n(Translation: The trend of revenue growth from 2021 to 2024 is VND 8.76 trillion in 2024, with a growth rate of 24% compared to 2023.)",
+      "score": 1.0,
+      "latency_s": 22.04,
+      "content_type": "figure",
+      "sources": [
+        "text:p2",
+        "text:p2",
+        "text:p3",
+        "text:p1"
+      ]
+    }
+  ]
+}
