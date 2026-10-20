@@ -1,8 +1,8 @@
 """
 SmartDoc-Insight Pipeline Orchestrator
 ────────────────────────────────────────
-Top-level API that wires all 4 layers together.
-Import this in the Streamlit app for clean access.
+Top-level API that wires all layers together.
+Used by the Streamlit app, the benchmark script and debug.py.
 """
 
 import logging
@@ -14,11 +14,11 @@ logger = logging.getLogger(__name__)
 class SmartDocPipeline:
     """
     Unified pipeline orchestrator for SmartDoc-Insight.
-    Wraps all 4 layers into a single clean interface.
+    Wraps all layers into a single clean interface.
 
     Usage:
         pipeline = SmartDocPipeline()
-        pipeline.ingest("report.pdf", progress_cb=my_callback)
+        pipeline.ingest("report.pdf", progress_callback=my_callback)
         response = pipeline.ask("What was Q3 revenue?")
     """
 
@@ -44,31 +44,29 @@ class SmartDocPipeline:
 
         Args:
             file_path: Path to PDF or image file
-            progress_callback: Optional callable(stage: str)
+            progress_callback: Optional callable(stage: str, fraction: float | None)
 
         Returns:
             dict with ingestion stats
         """
         file_path = Path(file_path)
 
-        def _vision_progress(page_idx, total, msg):
+        def report(msg, fraction=None):
             if progress_callback:
-                progress_callback(f"[Vision] {msg} ({page_idx+1}/{total})")
+                progress_callback(msg, fraction)
+
+        def _vision_progress(idx, total, msg):
+            # Vision covers the first 80% of the progress bar.
+            report(f"[Vision] {msg} ({idx + 1}/{total})", 0.8 * idx / max(total, 1))
 
         def _kb_progress(msg):
-            if progress_callback:
-                progress_callback(f"[KB] {msg}")
+            report(f"[KB] {msg}", 0.9)
 
-        # Layer A: Vision processing
-        if progress_callback:
-            progress_callback(f"Starting vision processing for {file_path.name}...")
-
+        report(f"Starting vision processing for {file_path.name}...", 0.0)
         processed_doc = self.vision.process_document(file_path, _vision_progress)
-
-        # Layer B: Knowledge base ingestion
         chunk_count = self.kb.ingest_document(processed_doc, _kb_progress)
+        report("Done", 1.0)
 
-        # Summarize what was found
         region_summary = {}
         for region in processed_doc.all_regions():
             region_summary[region.region_type] = region_summary.get(region.region_type, 0) + 1
@@ -80,22 +78,13 @@ class SmartDocPipeline:
             "regions": region_summary,
         }
 
-    def ask(self, question: str, source_filter: str = None):
-        """
-        Query the knowledge base and generate an answer.
+    def ask(self, question: str, source_filter: str = None, top_k: int = None, rerank_top_k: int = None):
+        """Query the knowledge base and generate an answer (RAGResponse)."""
+        return self.rag.query(question, filter_source=source_filter, top_k=top_k, rerank_top_k=rerank_top_k)
 
-        Args:
-            question: Natural language question
-            source_filter: Optional filename to restrict search scope
-
-        Returns:
-            RAGResponse with .answer and .sources
-        """
-        return self.rag.query(question, filter_source=source_filter)
-
-    def ask_stream(self, question: str, source_filter: str = None):
-        """Streaming version of ask(). Yields tokens."""
-        return self.rag.query_stream(question, filter_source=source_filter)
+    def ask_stream(self, question: str, source_filter: str = None, top_k: int = None, rerank_top_k: int = None):
+        """Streaming version of ask(): StreamingRAGResponse with `.sources` and a `.tokens` generator."""
+        return self.rag.query_stream(question, filter_source=source_filter, top_k=top_k, rerank_top_k=rerank_top_k)
 
     def stats(self) -> dict:
         """Return knowledge base stats."""
@@ -105,11 +94,16 @@ class SmartDocPipeline:
         """List all indexed documents."""
         return self.kb.list_documents()
 
+    def clear(self):
+        """Delete every indexed chunk."""
+        self.kb.clear_all()
+
     def check_models(self) -> dict:
         """Check which Ollama models are available."""
+        available = self.ollama.list_models()
         return {
-            "llm": self.ollama.is_model_available(self.config.ollama.llm_model),
-            "vision": self.ollama.is_model_available(self.config.ollama.vision_model),
-            "embed": self.ollama.is_model_available(self.config.ollama.embed_model),
-            "available_models": self.ollama.list_models(),
+            "llm": self.ollama.is_model_available(self.config.ollama.llm_model, available),
+            "vision": self.ollama.is_model_available(self.config.ollama.vision_model, available),
+            "embed": self.ollama.is_model_available(self.config.ollama.embed_model, available),
+            "available_models": available,
         }
