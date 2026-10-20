@@ -1,31 +1,28 @@
 # ── SmartDoc-Insight Dockerfile ───────────────────────────────────────────────
 FROM python:3.11-slim
 
-# System dependencies
-RUN apt-get update && apt-get install -y \
-    libgl1-mesa-glx \
+# System dependencies (libgl1/libglib for opencv, curl for the healthcheck)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1 \
     libglib2.0-0 \
     libgomp1 \
     curl \
-    git \
-    libpango-1.0-0 \
-    libpangocairo-1.0-0 \
-    fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Python dependencies (cached layer)
-COPY requirements.txt .
+# Python dependencies (cached layer). Set INSTALL_OCR=1 to add PaddleOCR.
+ARG INSTALL_OCR=0
+COPY requirements.txt requirements-ocr.txt ./
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
-
-# PaddleOCR models (download on build)
-RUN python -c "from paddleocr import PaddleOCR; PaddleOCR(use_angle_cls=True, lang='en', show_log=False)" || true
+    pip install --no-cache-dir -r requirements.txt && \
+    if [ "$INSTALL_OCR" = "1" ]; then pip install --no-cache-dir -r requirements-ocr.txt; fi
 
 # App code
 COPY src/ ./src/
 COPY app/ ./app/
+COPY scripts/ ./scripts/
+COPY test_data/ ./test_data/
 COPY .env.example .env
 
 # Create data directories
